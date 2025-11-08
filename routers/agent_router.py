@@ -192,6 +192,7 @@ async def check_availability(request: AgentRequest):
         response = AgentResponse(
             result=template_payload,
             session_id=session_id,
+            originalRequest=request.message,
             retrieved_products=product_matches,
             processing_time_ms=processing_time_ms,
             metadata={

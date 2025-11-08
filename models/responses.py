@@ -139,6 +139,7 @@ class AgentResponse(BaseModel):
 
     result: WhatsAppTemplatePayload = Field(..., description="WhatsApp template payload")
     session_id: str = Field(..., description="Conversation session ID")
+    originalRequest: str = Field(..., description="Original customer query/message")
 
     retrieved_products: List[ProductMatch] = Field(
         default_factory=list, description="Top K products retrieved from vector search"
@@ -176,6 +177,7 @@ class AgentResponse(BaseModel):
                     "status": "in_stock",
                 },
                 "session_id": "whatsapp_+919643524080",
+                "originalRequest": "PNEUMATIC STAPLER",
                 "retrieved_products": [
                     {
                         "name": "Pneumatic Stapler F30",
