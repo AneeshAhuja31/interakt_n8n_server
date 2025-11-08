@@ -25,7 +25,6 @@ class IntentClassification(BaseModel):
         "order_payment_confirmed",
         "alternate_suggestion_simple",
         "out_of_stock_simple",
-        "product_availability_query",
         "order_confirmation_approval",
         "general_text_message",
         "unknown",
@@ -103,7 +102,7 @@ class IntentResponse(BaseModel):
 def get_gemini_llm():
     """Initialize Gemini LLM via LangChain"""
     return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash-exp", google_api_key=settings.GOOGLE_API_KEY
+        model="gemini-2.5-flash", google_api_key=settings.GOOGLE_API_KEY
     )
 
 
