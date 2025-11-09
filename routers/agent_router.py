@@ -428,30 +428,33 @@ async def order_confirmation(request: OrderConfirmationRequest):
         # Import required modules
         from langchain_google_genai import ChatGoogleGenerativeAI
         from pydantic import BaseModel, Field as PydanticField
-        from typing import Optional
+        from typing import Optional, List
 
-        # Define structured output model
-        class OrderExtraction(BaseModel):
-            """Extracted order details from conversation"""
-            items: Optional[str] = PydanticField(
-                None,
-                description="Product name or items being ordered"
+        # Define structured output models
+        class OrderItemExtraction(BaseModel):
+            """Single item in an order"""
+            product_name: str = PydanticField(
+                ...,
+                description="Product name"
             )
-            price: Optional[str] = PydanticField(
-                None,
-                description="Unit price in INR (numbers only, no symbols)"
-            )
-            quantity: Optional[int] = PydanticField(
+            quantity: int = PydanticField(
                 1,
                 description="Number of items (default 1 if not mentioned)"
             )
-            discount: Optional[str] = PydanticField(
+            unit_price: str = PydanticField(
+                ...,
+                description="Unit price in INR (numbers only, no symbols)"
+            )
+            discount: str = PydanticField(
                 "No discount",
                 description="Discount information (e.g., '15% off' or 'No discount')"
             )
-            subtotal: Optional[str] = PydanticField(
-                None,
-                description="Total price (price × quantity, numbers only)"
+
+        class OrderExtraction(BaseModel):
+            """Extracted order details from conversation (supports multiple items)"""
+            items: List[OrderItemExtraction] = PydanticField(
+                ...,
+                description="List of items being ordered. Each item should have product_name, quantity (default 1), unit_price, and discount."
             )
 
         # Build conversation history for LLM
@@ -480,103 +483,158 @@ async def order_confirmation(request: OrderConfirmationRequest):
         # Create structured output LLM
         structured_llm = llm.with_structured_output(OrderExtraction)
 
-        # Create extraction prompt
-        extraction_prompt = f"""Analyze the conversation history and extract order details.
+        # Create extraction prompt for multiple items
+        extraction_prompt = f"""Analyze the conversation history and extract ALL order items the customer wants to order.
 
-Extract the following information:
-- items: Product name or items the customer wants to order
-- price: Unit price in INR (numbers only, no ₹ symbol)
-- quantity: Number of items (default to 1 if not mentioned)
+IMPORTANT: Extract MULTIPLE items if the customer is ordering more than one product. Each item should have:
+- product_name: Name of the product
+- quantity: Number of items (default to 1 if not mentioned for that specific product)
+- unit_price: Unit price in INR (numbers only, no ₹ symbol)
 - discount: Discount information if mentioned (e.g., "15% off" or "No discount")
-- subtotal: Total price (price × quantity, numbers only)
+
+Examples:
+- "I want 2 air staplers" → [{{product_name: "Air Stapler", quantity: 2, unit_price: "2499", discount: "No discount"}}]
+- "I want 2 air staplers and 3 nail boxes" → [
+    {{product_name: "Air Stapler", quantity: 2, unit_price: "2499", discount: "No discount"}},
+    {{product_name: "Nail Box", quantity: 3, unit_price: "500", discount: "No discount"}}
+  ]
+- "Give me one pneumatic stapler" → [{{product_name: "Pneumatic Stapler", quantity: 1, unit_price: "4500", discount: "15% off"}}]
 
 **Conversation History:**
 {conversation_history}
 
 **Current User Message:** {request.message}
 
-Extract the order details from the conversation above."""
+Extract ALL items from the conversation above. Look at the entire conversation history to identify all products and their details."""
 
         try:
             # Get structured output from LLM
             order_data = await structured_llm.ainvoke(extraction_prompt)
             logger.info(f"Extracted order data: {order_data}")
 
-            # Convert to dict for easier handling
-            order_dict = {
-                "product_name": order_data.items or "Product",
-                "quantity": order_data.quantity or 1,
-                "unit_price": order_data.price or "0",
-                "discount": order_data.discount or "No discount",
-                "total_price": order_data.subtotal or (
-                    str(int(order_data.price or "0") * (order_data.quantity or 1))
-                    if order_data.price and order_data.price.isdigit()
-                    else "0"
-                ),
-            }
+            # Validate that we have items
+            if not order_data.items or len(order_data.items) == 0:
+                raise ValueError("No items extracted from conversation")
+
+            # Process each item and calculate subtotals
+            order_items = []
+            total_price = 0
+
+            for item in order_data.items:
+                # Calculate subtotal for this item
+                try:
+                    unit_price_int = int(item.unit_price) if item.unit_price.isdigit() else 0
+                    quantity = item.quantity or 1
+                    subtotal = unit_price_int * quantity
+                except (ValueError, AttributeError):
+                    subtotal = 0
+
+                order_items.append({
+                    "product_name": item.product_name,
+                    "quantity": item.quantity or 1,
+                    "unit_price": item.unit_price,
+                    "discount": item.discount or "No discount",
+                    "subtotal": str(subtotal),
+                })
+
+                total_price += subtotal
+
+            logger.info(f"Processed {len(order_items)} items, total price: {total_price}")
 
         except Exception as e:
             logger.error(f"LLM extraction failed: {e}", exc_info=True)
-            # Fallback: Create default order data
-            order_dict = {
+            # Fallback: Create default single item
+            order_items = [{
                 "product_name": "Product",
                 "quantity": 1,
                 "unit_price": "0",
                 "discount": "No discount",
-                "total_price": "0",
-            }
+                "subtotal": "0",
+            }]
+            total_price = 0
 
-        # Generate order ID
+        # Generate order ID and item IDs
         from datetime import datetime
+        import uuid
 
-        order_id = f"ORD_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        order_id = f"ORD_{timestamp}"
 
-        # Create OrderSummary object
+        # Create OrderItem objects
+        from models.responses import OrderItem
+        order_item_objects = []
+
+        for idx, item in enumerate(order_items):
+            item_id = f"ITEM_{timestamp}_{idx+1:03d}"
+            order_item_objects.append(
+                OrderItem(
+                    product_name=item["product_name"],
+                    quantity=item["quantity"],
+                    unit_price=item["unit_price"],
+                    discount=item["discount"],
+                    subtotal=item["subtotal"],
+                    item_id=item_id,
+                )
+            )
+            # Add item_id to the dict for database insertion
+            item["item_id"] = item_id
+
+        # Create OrderSummary object with multiple items
         order_summary = OrderSummary(
-            product_name=order_dict.get("product_name", "Product"),
-            quantity=int(order_dict.get("quantity", 1)),
-            unit_price=str(order_dict.get("unit_price", "0")),
-            discount=order_dict.get("discount", "No discount"),
-            total_price=str(order_dict.get("total_price", "0")),
+            items=order_item_objects,
+            total_price=str(total_price),
             order_id=order_id,
         )
 
-        # Save order to database
+        # Save order to database (new multi-item structure)
         try:
-            await supabase_client.create_order(
+            # Create order header
+            await supabase_client.create_order_header(
+                order_id=order_id,
                 session_id=session_id,
                 phone_number=phone_number,
-                product_name=order_summary.product_name,
-                quantity=order_summary.quantity,
-                unit_price=order_summary.unit_price,
-                total_price=order_summary.total_price,
-                discount=order_summary.discount,
-                order_id=order_id,
+                total_price=str(total_price),
+                metadata={"item_count": len(order_items)},
             )
-            logger.info(f"Order saved to database: {order_id}")
+            logger.info(f"Order header saved to database: {order_id}")
+
+            # Create order items
+            await supabase_client.create_order_items(
+                order_id=order_id,
+                items=order_items,
+            )
+            logger.info(f"Saved {len(order_items)} items to database for order {order_id}")
+
         except Exception as e:
             logger.warning(f"Failed to save order to database: {e}")
 
-        # Save order summary as AI message
-        order_summary_text = f"Order Summary: {order_summary.product_name} x {order_summary.quantity} = ₹{order_summary.total_price} ({order_summary.discount})"
+        # Save order summary as AI message (with all items)
+        items_text = ", ".join([
+            f"{item.product_name} x{item.quantity}"
+            for item in order_summary.items
+        ])
+        order_summary_text = f"Order Summary: {items_text} | Total: ₹{order_summary.total_price}"
         try:
             await supabase_client.add_message(
                 session_id=session_id,
                 role="ai",
                 content=order_summary_text,
                 message_type="order_summary",
-                metadata={"order_id": order_id},
+                metadata={"order_id": order_id, "item_count": len(order_summary.items)},
             )
         except Exception as e:
             logger.warning(f"Failed to save order summary message: {e}")
 
         # Prepare template body values for WhatsApp
+        # Format: "Product1 (x2), Product2 (x1)", "Total", "Order ID"
+        items_summary = ", ".join([
+            f"{item.product_name} (x{item.quantity})"
+            for item in order_summary.items
+        ])
         template_body_values = [
-            order_summary.product_name,
-            order_summary.unit_price,
-            f"({order_summary.discount})",
-            str(order_summary.quantity),
+            items_summary,
             f"₹{order_summary.total_price}",
+            order_id,
         ]
 
         processing_time_ms = int((time.time() - start_time) * 1000)

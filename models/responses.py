@@ -215,15 +215,15 @@ class SaveMessageResponse(BaseModel):
         }
 
 
-class OrderSummary(BaseModel):
-    """Extracted order details from chat history"""
+class OrderItem(BaseModel):
+    """Individual item in an order"""
 
     product_name: str = Field(..., description="Product name from conversation")
     quantity: int = Field(default=1, description="Number of items", ge=1)
     unit_price: str = Field(..., description="Price per unit (formatted string)")
     discount: str = Field(default="No discount", description="Discount information")
-    total_price: str = Field(..., description="Total order price (formatted string)")
-    order_id: Optional[str] = Field(None, description="Generated order ID")
+    subtotal: str = Field(..., description="Item subtotal (unit_price × quantity)")
+    item_id: Optional[str] = Field(None, description="Generated item ID")
 
     class Config:
         json_schema_extra = {
@@ -232,17 +232,49 @@ class OrderSummary(BaseModel):
                 "quantity": 2,
                 "unit_price": "2499",
                 "discount": "15% off",
-                "total_price": "4998",
+                "subtotal": "4998",
+                "item_id": "ITEM_20250109_001",
+            }
+        }
+
+
+class OrderSummary(BaseModel):
+    """Extracted order details from chat history (supports multiple items)"""
+
+    items: List[OrderItem] = Field(..., description="List of items in the order")
+    total_price: str = Field(..., description="Total order price (sum of all items)")
+    order_id: Optional[str] = Field(None, description="Generated order ID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "items": [
+                    {
+                        "product_name": "Air Stapler",
+                        "quantity": 2,
+                        "unit_price": "2499",
+                        "discount": "15% off",
+                        "subtotal": "4998",
+                    },
+                    {
+                        "product_name": "Nails Box",
+                        "quantity": 1,
+                        "unit_price": "500",
+                        "discount": "No discount",
+                        "subtotal": "500",
+                    },
+                ],
+                "total_price": "5498",
                 "order_id": "ORD_20250109_001",
             }
         }
 
 
 class OrderConfirmationResponse(BaseModel):
-    """Response from order-confirmation endpoint"""
+    """Response from order-confirmation endpoint (supports multiple items)"""
 
     success: bool = Field(..., description="Whether order was processed successfully")
-    order: OrderSummary = Field(..., description="Extracted order details")
+    order: OrderSummary = Field(..., description="Extracted order details with multiple items")
     template_body_values: List[str] = Field(
         ..., description="Values to populate WhatsApp template"
     )
@@ -256,14 +288,26 @@ class OrderConfirmationResponse(BaseModel):
             "example": {
                 "success": True,
                 "order": {
-                    "product_name": "Air Stapler",
-                    "quantity": 2,
-                    "unit_price": "2499",
-                    "discount": "15% off",
-                    "total_price": "4998",
+                    "items": [
+                        {
+                            "product_name": "Air Stapler",
+                            "quantity": 2,
+                            "unit_price": "2499",
+                            "discount": "15% off",
+                            "subtotal": "4998",
+                        },
+                        {
+                            "product_name": "Nails Box",
+                            "quantity": 1,
+                            "unit_price": "500",
+                            "discount": "No discount",
+                            "subtotal": "500",
+                        },
+                    ],
+                    "total_price": "5498",
                     "order_id": "ORD_20250109_001",
                 },
-                "template_body_values": ["Air Stapler", "2499", "(15% off)", "2", "₹4998"],
+                "template_body_values": ["Air Stapler (x2), Nails Box (x1)", "₹5498", "ORD_20250109_001"],
                 "session_id": "whatsapp_+919643524080",
                 "message": "Order confirmed successfully",
             }

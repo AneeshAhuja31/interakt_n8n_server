@@ -117,5 +117,5 @@ def test_query(query_text: str, limit: int = 5):
         if payload.get("cloudinary_url"):
             print(f"   Image: {payload['cloudinary_url']}")
 
-test_query("Air Screwdriver")
+test_query("mujhe r 13 chahiye")
 # embed_text()

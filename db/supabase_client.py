@@ -427,6 +427,152 @@ class SupabaseClient:
 
         raise Exception(f"Failed to update order {order_id}")
 
+    # ============================================================
+    # ORDER HEADERS & ITEMS (NEW MULTI-ITEM ORDERS)
+    # ============================================================
+
+    async def create_order_header(
+        self,
+        order_id: str,
+        session_id: str,
+        phone_number: str,
+        total_price: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new order header (for multi-item orders)
+
+        Args:
+            order_id: Unique order ID
+            session_id: Session identifier
+            phone_number: Customer phone number
+            total_price: Total order price (sum of all items)
+            metadata: Additional metadata
+
+        Returns:
+            Created order header record
+        """
+        order_header_data = {
+            "order_id": order_id,
+            "session_id": session_id,
+            "phone_number": phone_number,
+            "total_price": total_price,
+            "order_status": "pending",
+            "metadata": metadata or {},
+        }
+
+        response = self.client.table("order_headers").insert(order_header_data).execute()
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+        raise Exception("Failed to create order header")
+
+    async def create_order_items(
+        self,
+        order_id: str,
+        items: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Create multiple order items (batch insert)
+
+        Args:
+            order_id: Order ID to associate items with
+            items: List of item dictionaries with keys:
+                - item_id: Unique item ID
+                - product_name: Product name
+                - quantity: Number of items (default 1)
+                - unit_price: Price per unit
+                - discount: Discount information
+                - subtotal: Item subtotal (unit_price × quantity)
+                - metadata: Optional additional data
+
+        Returns:
+            List of created order item records
+        """
+        # Add order_id to each item
+        items_data = []
+        for item in items:
+            item_data = {
+                "order_id": order_id,
+                "item_id": item.get("item_id"),
+                "product_name": item.get("product_name"),
+                "quantity": item.get("quantity", 1),
+                "unit_price": item.get("unit_price"),
+                "discount": item.get("discount", "No discount"),
+                "subtotal": item.get("subtotal"),
+                "metadata": item.get("metadata", {}),
+            }
+            items_data.append(item_data)
+
+        response = self.client.table("order_items").insert(items_data).execute()
+
+        if response.data and len(response.data) > 0:
+            return response.data
+
+        raise Exception("Failed to create order items")
+
+    async def get_order_with_items(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get order header with all associated items
+
+        Args:
+            order_id: Order ID
+
+        Returns:
+            Dict with order header and items, or None if not found
+        """
+        # Get order header
+        header_response = (
+            self.client.table("order_headers")
+            .select("*")
+            .eq("order_id", order_id)
+            .execute()
+        )
+
+        if not header_response.data or len(header_response.data) == 0:
+            return None
+
+        order_header = header_response.data[0]
+
+        # Get order items
+        items_response = (
+            self.client.table("order_items")
+            .select("*")
+            .eq("order_id", order_id)
+            .execute()
+        )
+
+        return {
+            "header": order_header,
+            "items": items_response.data if items_response.data else [],
+        }
+
+    async def update_order_header_status(
+        self, order_id: str, status: str
+    ) -> Dict[str, Any]:
+        """
+        Update order header status
+
+        Args:
+            order_id: Order ID
+            status: New status (pending, confirmed, cancelled, completed)
+
+        Returns:
+            Updated order header record
+        """
+        response = (
+            self.client.table("order_headers")
+            .update({"order_status": status})
+            .eq("order_id", order_id)
+            .execute()
+        )
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+        raise Exception(f"Failed to update order header {order_id}")
+
     async def get_customer_orders(
         self, phone_number: str, limit: int = 10
     ) -> List[Dict[str, Any]]:
