@@ -194,3 +194,77 @@ class AgentResponse(BaseModel):
                 "metadata": {"llm_calls": 1, "qdrant_search_time_ms": 120},
             }
         }
+
+
+class SaveMessageResponse(BaseModel):
+    """Response from save-message endpoint"""
+
+    success: bool = Field(..., description="Whether message was saved successfully")
+    session_id: str = Field(..., description="Session ID for the message")
+    message_id: Optional[int] = Field(None, description="Database ID of saved message")
+    message: str = Field(default="Message saved successfully", description="Status message")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "session_id": "whatsapp_+919643524080",
+                "message_id": 123,
+                "message": "Message saved successfully",
+            }
+        }
+
+
+class OrderSummary(BaseModel):
+    """Extracted order details from chat history"""
+
+    product_name: str = Field(..., description="Product name from conversation")
+    quantity: int = Field(default=1, description="Number of items", ge=1)
+    unit_price: str = Field(..., description="Price per unit (formatted string)")
+    discount: str = Field(default="No discount", description="Discount information")
+    total_price: str = Field(..., description="Total order price (formatted string)")
+    order_id: Optional[str] = Field(None, description="Generated order ID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "product_name": "Air Stapler",
+                "quantity": 2,
+                "unit_price": "2499",
+                "discount": "15% off",
+                "total_price": "4998",
+                "order_id": "ORD_20250109_001",
+            }
+        }
+
+
+class OrderConfirmationResponse(BaseModel):
+    """Response from order-confirmation endpoint"""
+
+    success: bool = Field(..., description="Whether order was processed successfully")
+    order: OrderSummary = Field(..., description="Extracted order details")
+    template_body_values: List[str] = Field(
+        ..., description="Values to populate WhatsApp template"
+    )
+    session_id: str = Field(..., description="Conversation session ID")
+    message: str = Field(
+        default="Order confirmed successfully", description="Status message"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "order": {
+                    "product_name": "Air Stapler",
+                    "quantity": 2,
+                    "unit_price": "2499",
+                    "discount": "15% off",
+                    "total_price": "4998",
+                    "order_id": "ORD_20250109_001",
+                },
+                "template_body_values": ["Air Stapler", "2499", "(15% off)", "2", "₹4998"],
+                "session_id": "whatsapp_+919643524080",
+                "message": "Order confirmed successfully",
+            }
+        }

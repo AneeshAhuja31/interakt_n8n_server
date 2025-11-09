@@ -3,7 +3,7 @@ Pydantic request models for WhatsApp AI Service
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
 
 class AgentRequest(BaseModel):
@@ -111,3 +111,80 @@ class AgentRequestFromN8N(BaseModel):
             )
         except Exception as e:
             raise ValueError(f"Invalid n8n webhook payload structure: {str(e)}")
+
+
+class SaveMessageRequest(BaseModel):
+    """Request to save a message to chat history"""
+
+    phone_number: str = Field(
+        ...,
+        description="Customer WhatsApp phone number with country code",
+        pattern=r"^\+?[1-9]\d{1,14}$",
+        examples=["+919643524080", "9643524080"],
+    )
+
+    role: Literal["human", "ai", "system"] = Field(
+        ...,
+        description="Message sender role",
+    )
+
+    content: str = Field(
+        ...,
+        description="Message content/text",
+        min_length=1,
+    )
+
+    message_type: str = Field(
+        default="text",
+        description="Type of message",
+        examples=["text", "audio", "image", "button_click", "template"],
+    )
+
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Additional metadata for the message",
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "phone_number": "+919643524080",
+                "role": "human",
+                "content": "Do you have air stapler?",
+                "message_type": "text",
+                "metadata": {"source": "whatsapp"},
+            }
+        }
+
+
+class OrderConfirmationRequest(BaseModel):
+    """Request to generate order confirmation from chat history"""
+
+    message: str = Field(
+        ...,
+        description="Current user message (e.g., 'Confirm my order', 'Yes', etc.)",
+        min_length=1,
+        examples=["Confirm my order", "Yes, I want this", "I'll take 2"],
+    )
+
+    phone_number: str = Field(
+        ...,
+        description="Customer WhatsApp phone number with country code",
+        pattern=r"^\+?[1-9]\d{1,14}$",
+        examples=["+919643524080", "9643524080"],
+    )
+
+    session_id: Optional[str] = Field(
+        None,
+        description="Session ID (auto-generated if not provided)",
+        examples=["whatsapp_+919643524080"],
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "message": "Confirm my order",
+                "phone_number": "+919643524080",
+                "session_id": "whatsapp_+919643524080",
+            }
+        }

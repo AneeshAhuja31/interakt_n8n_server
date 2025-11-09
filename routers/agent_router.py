@@ -4,8 +4,15 @@ Replaces the n8n AI Agent cluster (8 nodes) with a single HTTP endpoint
 """
 
 from fastapi import APIRouter, HTTPException
-from models.requests import AgentRequest, AgentRequestFromN8N
-from models.responses import AgentResponse, WhatsAppTemplatePayload, ProductMatch
+from models.requests import AgentRequest, AgentRequestFromN8N, SaveMessageRequest, OrderConfirmationRequest
+from models.responses import (
+    AgentResponse,
+    WhatsAppTemplatePayload,
+    ProductMatch,
+    SaveMessageResponse,
+    OrderConfirmationResponse,
+    OrderSummary,
+)
 from agents.availability_agent import get_availability_agent
 from db.supabase_client import get_supabase_client
 from config import settings
@@ -272,3 +279,321 @@ async def agent_health_check():
         "vector_store": "Qdrant",
         "collection": settings.QDRANT_COLLECTION,
     }
+
+
+@router.post("/save-message", response_model=SaveMessageResponse)
+async def save_message(request: SaveMessageRequest):
+    """
+    Save a message to chat history
+
+    **Purpose:**
+    Store user and AI messages to maintain conversation context across all workflow paths.
+    This endpoint should be called from n8n HTTP Request nodes throughout the workflow.
+
+    **Workflow Integration Points:**
+    1. After user sends any message (text/audio/image)
+    2. After user clicks any button (quick reply)
+    3. After AI sends any template response
+
+    **Args:**
+        request: SaveMessageRequest with phone_number, role, content, message_type, metadata
+
+    **Returns:**
+        SaveMessageResponse with success status and message ID
+    """
+    try:
+        # Ensure phone number has country code
+        phone_number = request.phone_number
+        if not phone_number.startswith("+"):
+            phone_number = f"+91{phone_number}"
+
+        # Generate session ID
+        session_id = f"whatsapp_{phone_number}"
+
+        if not supabase_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Database client not available. Check Supabase configuration.",
+            )
+
+        # Get or create session
+        try:
+            session = await supabase_client.get_or_create_session(phone_number)
+            logger.info(f"Session retrieved/created: {session.get('session_id')}")
+        except Exception as e:
+            logger.warning(f"Failed to create session: {e}")
+            # Continue anyway with generated session_id
+
+        # Save message to database
+        try:
+            await supabase_client.add_message(
+                session_id=session_id,
+                role=request.role,
+                content=request.content,
+                message_type=request.message_type,
+                metadata=request.metadata,
+            )
+            logger.info(
+                f"[/agent/save-message] Saved {request.role} message for {phone_number}: {request.content[:50]}..."
+            )
+
+            return SaveMessageResponse(
+                success=True,
+                session_id=session_id,
+                message_id=None,  # Supabase client doesn't return ID currently
+                message="Message saved successfully",
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to save message: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to save message: {str(e)}"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[/agent/save-message] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.post("/order-confirmation", response_model=OrderConfirmationResponse)
+async def order_confirmation(request: OrderConfirmationRequest):
+    """
+    Generate order confirmation from chat history using LLM
+
+    **Purpose:**
+    Analyze recent conversation history to extract order details (product, quantity, price)
+    and generate a structured order summary for the WhatsApp template.
+
+    **Workflow:**
+    1. Retrieve last 15 messages from chat history
+    2. Save user's confirmation message
+    3. Use LLM to extract order details from conversation
+    4. Generate order summary
+    5. Save order to customer_orders table
+    6. Return template body values for n8n
+
+    **Args:**
+        request: OrderConfirmationRequest with message, phone_number, session_id
+
+    **Returns:**
+        OrderConfirmationResponse with order details and template values
+    """
+    start_time = time.time()
+
+    try:
+        # Ensure phone number has country code
+        phone_number = request.phone_number
+        if not phone_number.startswith("+"):
+            phone_number = f"+91{phone_number}"
+
+        # Generate or use provided session ID
+        session_id = request.session_id or f"whatsapp_{phone_number}"
+
+        if not supabase_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Database client not available. Check Supabase configuration.",
+            )
+
+        # Get or create session
+        try:
+            session = await supabase_client.get_or_create_session(phone_number)
+            logger.info(f"Session retrieved/created: {session.get('session_id')}")
+        except Exception as e:
+            logger.warning(f"Failed to get session: {e}")
+
+        # Save user's order confirmation message
+        try:
+            await supabase_client.add_message(
+                session_id=session_id,
+                role="human",
+                content=request.message,
+                message_type="text",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save user message: {e}")
+
+        # Retrieve recent chat history
+        try:
+            messages = await supabase_client.get_recent_messages(
+                session_id=session_id, limit=15
+            )
+            logger.info(f"Retrieved {len(messages)} messages from history")
+        except Exception as e:
+            logger.warning(f"Failed to retrieve message history: {e}")
+            messages = []
+
+        # Import required modules
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from pydantic import BaseModel, Field as PydanticField
+        from typing import Optional
+
+        # Define structured output model
+        class OrderExtraction(BaseModel):
+            """Extracted order details from conversation"""
+            items: Optional[str] = PydanticField(
+                None,
+                description="Product name or items being ordered"
+            )
+            price: Optional[str] = PydanticField(
+                None,
+                description="Unit price in INR (numbers only, no symbols)"
+            )
+            quantity: Optional[int] = PydanticField(
+                1,
+                description="Number of items (default 1 if not mentioned)"
+            )
+            discount: Optional[str] = PydanticField(
+                "No discount",
+                description="Discount information (e.g., '15% off' or 'No discount')"
+            )
+            subtotal: Optional[str] = PydanticField(
+                None,
+                description="Total price (price × quantity, numbers only)"
+            )
+
+        # Build conversation history for LLM
+        conversation_history = "\n".join(
+            [
+                f"{msg.get('role', 'unknown').upper()}: {msg.get('content', '')}"
+                for msg in messages
+            ]
+        )
+
+        # Check if we have any conversation history
+        if not conversation_history.strip():
+            logger.warning("No conversation history found for order confirmation")
+            raise HTTPException(
+                status_code=400,
+                detail="No conversation history found. Please ask about a product first before confirming an order."
+            )
+
+        # Use LLM with structured output to extract order details
+        llm = ChatGoogleGenerativeAI(
+            model=settings.GEMINI_MODEL,
+            temperature=0,
+            google_api_key=settings.GOOGLE_API_KEY,
+        )
+
+        # Create structured output LLM
+        structured_llm = llm.with_structured_output(OrderExtraction)
+
+        # Create extraction prompt
+        extraction_prompt = f"""Analyze the conversation history and extract order details.
+
+Extract the following information:
+- items: Product name or items the customer wants to order
+- price: Unit price in INR (numbers only, no ₹ symbol)
+- quantity: Number of items (default to 1 if not mentioned)
+- discount: Discount information if mentioned (e.g., "15% off" or "No discount")
+- subtotal: Total price (price × quantity, numbers only)
+
+**Conversation History:**
+{conversation_history}
+
+**Current User Message:** {request.message}
+
+Extract the order details from the conversation above."""
+
+        try:
+            # Get structured output from LLM
+            order_data = await structured_llm.ainvoke(extraction_prompt)
+            logger.info(f"Extracted order data: {order_data}")
+
+            # Convert to dict for easier handling
+            order_dict = {
+                "product_name": order_data.items or "Product",
+                "quantity": order_data.quantity or 1,
+                "unit_price": order_data.price or "0",
+                "discount": order_data.discount or "No discount",
+                "total_price": order_data.subtotal or (
+                    str(int(order_data.price or "0") * (order_data.quantity or 1))
+                    if order_data.price and order_data.price.isdigit()
+                    else "0"
+                ),
+            }
+
+        except Exception as e:
+            logger.error(f"LLM extraction failed: {e}", exc_info=True)
+            # Fallback: Create default order data
+            order_dict = {
+                "product_name": "Product",
+                "quantity": 1,
+                "unit_price": "0",
+                "discount": "No discount",
+                "total_price": "0",
+            }
+
+        # Generate order ID
+        from datetime import datetime
+
+        order_id = f"ORD_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        # Create OrderSummary object
+        order_summary = OrderSummary(
+            product_name=order_dict.get("product_name", "Product"),
+            quantity=int(order_dict.get("quantity", 1)),
+            unit_price=str(order_dict.get("unit_price", "0")),
+            discount=order_dict.get("discount", "No discount"),
+            total_price=str(order_dict.get("total_price", "0")),
+            order_id=order_id,
+        )
+
+        # Save order to database
+        try:
+            await supabase_client.create_order(
+                session_id=session_id,
+                phone_number=phone_number,
+                product_name=order_summary.product_name,
+                quantity=order_summary.quantity,
+                unit_price=order_summary.unit_price,
+                total_price=order_summary.total_price,
+                discount=order_summary.discount,
+                order_id=order_id,
+            )
+            logger.info(f"Order saved to database: {order_id}")
+        except Exception as e:
+            logger.warning(f"Failed to save order to database: {e}")
+
+        # Save order summary as AI message
+        order_summary_text = f"Order Summary: {order_summary.product_name} x {order_summary.quantity} = ₹{order_summary.total_price} ({order_summary.discount})"
+        try:
+            await supabase_client.add_message(
+                session_id=session_id,
+                role="ai",
+                content=order_summary_text,
+                message_type="order_summary",
+                metadata={"order_id": order_id},
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save order summary message: {e}")
+
+        # Prepare template body values for WhatsApp
+        template_body_values = [
+            order_summary.product_name,
+            order_summary.unit_price,
+            f"({order_summary.discount})",
+            str(order_summary.quantity),
+            f"₹{order_summary.total_price}",
+        ]
+
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        logger.info(
+            f"[/agent/order-confirmation] Order processed in {processing_time_ms}ms: {order_id}"
+        )
+
+        return OrderConfirmationResponse(
+            success=True,
+            order=order_summary,
+            template_body_values=template_body_values,
+            session_id=session_id,
+            message="Order confirmed successfully",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[/agent/order-confirmation] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Order confirmation error: {str(e)}")

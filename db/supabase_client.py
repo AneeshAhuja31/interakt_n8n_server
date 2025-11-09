@@ -325,6 +325,132 @@ class SupabaseClient:
 
         return response.data if response.data else []
 
+    # ============================================================
+    # ORDER MANAGEMENT
+    # ============================================================
+
+    async def create_order(
+        self,
+        session_id: str,
+        phone_number: str,
+        product_name: str,
+        quantity: int,
+        unit_price: str,
+        total_price: str,
+        discount: str = "No discount",
+        order_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new customer order
+
+        Args:
+            session_id: Session identifier
+            phone_number: Customer phone number
+            product_name: Name of the product ordered
+            quantity: Number of items
+            unit_price: Price per unit (as string)
+            total_price: Total order price (as string)
+            discount: Discount information
+            order_id: Optional custom order ID
+            metadata: Additional metadata
+
+        Returns:
+            Created order record
+        """
+        order_data = {
+            "session_id": session_id,
+            "phone_number": phone_number,
+            "product_name": product_name,
+            "quantity": quantity,
+            "unit_price": unit_price,
+            "total_price": total_price,
+            "discount": discount,
+            "order_status": "pending",
+            "metadata": metadata or {},
+        }
+
+        if order_id:
+            order_data["order_id"] = order_id
+
+        response = self.client.table("customer_orders").insert(order_data).execute()
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+        raise Exception("Failed to create order")
+
+    async def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get order by ID
+
+        Args:
+            order_id: Order ID
+
+        Returns:
+            Order record or None if not found
+        """
+        response = (
+            self.client.table("customer_orders")
+            .select("*")
+            .eq("order_id", order_id)
+            .execute()
+        )
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+        return None
+
+    async def update_order_status(
+        self, order_id: str, status: str
+    ) -> Dict[str, Any]:
+        """
+        Update order status
+
+        Args:
+            order_id: Order ID
+            status: New status (pending, confirmed, cancelled)
+
+        Returns:
+            Updated order record
+        """
+        response = (
+            self.client.table("customer_orders")
+            .update({"order_status": status})
+            .eq("order_id", order_id)
+            .execute()
+        )
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+        raise Exception(f"Failed to update order {order_id}")
+
+    async def get_customer_orders(
+        self, phone_number: str, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Get orders for a customer
+
+        Args:
+            phone_number: Customer phone number
+            limit: Number of orders to retrieve
+
+        Returns:
+            List of order records
+        """
+        response = (
+            self.client.table("customer_orders")
+            .select("*")
+            .eq("phone_number", phone_number)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        return response.data if response.data else []
+
 
 @lru_cache()
 def get_supabase_client() -> SupabaseClient:
