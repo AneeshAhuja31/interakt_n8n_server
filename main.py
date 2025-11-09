@@ -97,13 +97,14 @@ async def health_check():
 # ============================================================
 
 if __name__ == "__main__":
-    import uvicorn
-
+    import uvicorn,os
+    from dotenv import load_dotenv
+    load_dotenv()
     # Use import string so uvicorn can enable the --reload feature
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8080,
+        port=os.getenv("PORT",8000),
         reload=True,
         log_level="info",
     )
