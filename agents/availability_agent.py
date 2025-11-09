@@ -39,10 +39,11 @@ def query_qdrant_node(state: AvailabilityAgentState) -> Dict[str, Any]:
 
     try:
         # Search products using Qdrant
+        # Using lower threshold to allow LLM to reason about name matches
         products = search_products(
             query=state["customer_message"],
             top_k=settings.QDRANT_TOP_K,
-            score_threshold=0.5,  # Only return products with >50% similarity
+            score_threshold=0.3,  # Lower threshold - LLM will decide based on name reasoning
         )
 
         search_time_ms = int((time.time() - start_time) * 1000)
@@ -127,10 +128,17 @@ def llm_decision_node(state: AvailabilityAgentState) -> Dict[str, Any]:
             ("system", """You are an expert product availability agent for "Star Trade" - a pneumatic tools and hardware company in India.
 
 **Your Task:**
-1. Determine availability status:
-   - "in_stock": The matched product is a good match (similarity > 0.75) and available
-   - "out_of_stock": No good match found (similarity < 0.60)
-   - "alternate_available": Match is moderate (0.60-0.75) or customer might want alternatives
+1. Determine availability status using LLM-based name reasoning:
+   - "in_stock": The product name closely matches what the customer is asking for, even if not exact
+     * Use your understanding to determine if names are similar/related (e.g., "air compressor" vs "compressor", "drill machine" vs "drill")
+     * Consider abbreviations, variations, and common naming patterns
+     * Focus on semantic meaning, NOT similarity scores
+     * If the name is even a close bit similar based on your reasoning, classify as in_stock
+
+   - "out_of_stock": The product name is clearly unrelated to what the customer is asking for
+     * Only use when there's no reasonable connection between customer query and product name
+
+   - "alternate_available": Product is related but customer might want to see more options
 
 2. Generate a friendly Hinglish (Hindi + English mix) response message for WhatsApp
    - Use conversational tone
@@ -140,10 +148,11 @@ def llm_decision_node(state: AvailabilityAgentState) -> Dict[str, Any]:
      * "Sorry, exact product abhi nahi hai, but similar product available: {{name}} at {{price}}. Link: {{url}}"
 
 **Important:**
+- IGNORE similarity scores - use your own reasoning about name matching
 - Return structured data with all required fields
-- Always include all fields
 - Make output message natural and friendly
-- Use Hinglish (Hindi-English mix) that's easy to read on WhatsApp"""),
+- Use Hinglish (Hindi-English mix) that's easy to read on WhatsApp
+- Be lenient with name matching - if names are even slightly related, mark as in_stock"""),
             ("user", """**Customer Query:** {customer_message}
 
 **Top Matched Product from Database:**
@@ -208,19 +217,13 @@ def llm_decision_node(state: AvailabilityAgentState) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"[llm_decision_node] Error: {str(e)}")
 
-        # Fallback to rule-based decision
+        # Fallback: Since LLM failed, assume product is in stock if we found a match
+        # (the vector search already filtered for us)
         top_product = state["top_product"]
-        similarity_score = top_product.get("similarity_score", 0)
 
-        if similarity_score >= 0.75:
-            status = "in_stock"
-            message = f"Haan, {top_product['name']} available hai! Price: {top_product['price']}. Check: {top_product['product_url']}"
-        elif similarity_score >= 0.60:
-            status = "alternate_available"
-            message = f"Exact match nahi mila, but similar product available: {top_product['name']} at {top_product['price']}. Link: {top_product['product_url']}"
-        else:
-            status = "out_of_stock"
-            message = f"Sorry, '{state['customer_message']}' abhi available nahi hai."
+        # Default to in_stock if we have a product (vector search already did initial filtering)
+        status = "in_stock"
+        message = f"Haan, {top_product['name']} available hai! Price: {top_product['price']}. Check: {top_product['product_url']}"
 
         return {
             "availability_status": status,
@@ -232,7 +235,7 @@ def llm_decision_node(state: AvailabilityAgentState) -> Dict[str, Any]:
             "product_url": top_product.get("product_url", ""),
             "image_url": top_product.get("image_url", ""),
             "hinglish_output": message,
-            "reasoning": f"Fallback rule-based decision (LLM error). Error: {str(e)}",
+            "reasoning": f"Fallback decision (LLM error) - defaulting to in_stock. Error: {str(e)}",
             "error": f"LLM failed, used fallback: {str(e)}",
             "current_node": "llm_decision",
         }
