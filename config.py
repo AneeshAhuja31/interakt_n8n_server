@@ -23,7 +23,6 @@ class Settings():
     # Supabase / Postgres
     SUPABASE_URL: str =  os.getenv("SUPABASE_URL")
     SUPABASE_KEY: str =  os.getenv("SUPABASE_KEY")
-    POSTGRES_URI: Optional[str] = os.getenv("POSTGRES_URI",None)  # Optional for LangGraph checkpointing
 
     # OpenAI (for embeddings)
     OPENAI_API_KEY:  str =  os.getenv("OPENAI_API_KEY")

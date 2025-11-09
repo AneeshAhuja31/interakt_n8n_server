@@ -3,9 +3,8 @@ LangGraph Availability Checking Agent
 Replaces the n8n AI Agent cluster with a stateful LangGraph workflow
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.postgres import PostgresSaver
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from agents.state import AvailabilityAgentState
@@ -246,13 +245,9 @@ def llm_decision_node(state: AvailabilityAgentState) -> Dict[str, Any]:
 # ============================================================
 
 
-def create_availability_agent(postgres_uri: Optional[str] = None):
+def create_availability_agent():
     """
     Create the LangGraph availability checking agent
-
-    Args:
-        postgres_uri: PostgreSQL connection string for checkpointing
-                     If None, uses settings.POSTGRES_URI
 
     Returns:
         Compiled LangGraph workflow
@@ -271,19 +266,8 @@ def create_availability_agent(postgres_uri: Optional[str] = None):
     workflow.add_edge("query_qdrant", "llm_decision")
     workflow.add_edge("llm_decision", END)
 
-    # Setup checkpointing if Postgres URI provided
-    if postgres_uri or settings.POSTGRES_URI:
-        try:
-            checkpointer = PostgresSaver.from_conn_string(
-                postgres_uri or settings.POSTGRES_URI
-            )
-            compiled_graph = workflow.compile(checkpointer=checkpointer)
-            compiled_graph.get_graph().draw_mermaid_png("mermaid.png")
-        except Exception as e:
-            
-            compiled_graph = workflow.compile()
-    else:
-        compiled_graph = workflow.compile()
+    # Compile without checkpointing
+    compiled_graph = workflow.compile()
 
     return compiled_graph
 
