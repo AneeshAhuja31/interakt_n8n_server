@@ -23,7 +23,6 @@ class IntentClassification(BaseModel):
         "order_address_collect",
         "order_payment_choice",
         "order_payment_confirmed",
-        "alternate_suggestion_simple",
         "out_of_stock_simple",
         "order_confirmation_approval",
         "general_text_message",
@@ -123,7 +122,7 @@ Your job is to analyze the customer's message and classify it into one of the pr
 
 1. **welcome_greeting**: User is greeting or starting conversation (hi, hello, hey, namaste, good morning/evening, asking "is this Star Trade?")
 
-2. **availability_check_with_link**: User asking about product availability, price, rate, discount, or if a product/tool is available
+2. **availability_check_with_link**: User asking about product availability, price, rate, discount, if a product/tool is available, OR requesting alternate products, similar items, other options ("kuch aur", "similar", "alternate"). This intent first checks if the product is available.
 
 3. **order_confirmation_simple**: User wants to confirm order, place order, book something (includes "order kardo", "book", etc.)
 
@@ -133,17 +132,15 @@ Your job is to analyze the customer's message and classify it into one of the pr
 
 6. **order_payment_confirmed**: User confirming payment is done ("paid", "payment done", "transfer ho gaya", "I have paid")
 
-7. **alternate_suggestion_simple**: User wants alternate products, similar items, other options ("kuch aur", "similar", "alternate")
+7. **out_of_stock_simple**: Discussion about out of stock items, product not available
 
-8. **out_of_stock_simple**: Discussion about out of stock items, product not available
+8. **product_availability_query**: When user is already in availability_check_with_link flow and sends a product name or inquiry
 
-9. **product_availability_query**: When user is already in availability_check_with_link flow and sends a product name or inquiry
+9. **order_confirmation_approval**: When user is in order_confirmation_simple flow and responds with yes/confirm/ok/done
 
-10. **order_confirmation_approval**: When user is in order_confirmation_simple flow and responds with yes/confirm/ok/done
+10. **general_text_message**: Any other text message that doesn't fit the above categories
 
-11. **general_text_message**: Any other text message that doesn't fit the above categories
-
-12. **unknown**: When message type is not text or intent cannot be determined
+11. **unknown**: When message type is not text or intent cannot be determined
 
 **Context-Aware Rules:**
 - If active_flow is "availability_check_with_link" and message_type is "text", likely intent is "product_availability_query"
