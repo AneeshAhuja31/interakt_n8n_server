@@ -357,22 +357,110 @@ async def save_message(request: SaveMessageRequest):
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
+def preprocess_order_context(messages: list, current_message: str) -> dict:
+    """
+    Preprocess chat history to extract only order-relevant context
+
+    This function filters and processes conversation history to identify:
+    1. Product discussions (availability, pricing, specs)
+    2. Order intent messages
+    3. Removes greetings, unrelated queries, and general messages
+
+    Args:
+        messages: List of message dicts from agent_messages table
+        current_message: Current user message confirming order
+
+    Returns:
+        dict with filtered_messages, product_context, and order_relevant_history
+    """
+    # Define keywords that indicate order-relevant messages
+    order_keywords = [
+        "price", "rate", "cost", "available", "stock", "discount", "₹", "rs",
+        "order", "book", "confirm", "quantity", "specs", "product", "tool",
+        "stapler", "nail", "gun", "hammer", "drill", "wrench", "bolt"
+    ]
+
+    greeting_keywords = [
+        "hello", "hi", "hey", "namaste", "good morning", "good evening"
+    ]
+
+    # Filter messages based on relevance
+    filtered_messages = []
+
+    for msg in messages:
+        content = msg.get("content", "").lower()
+        role = msg.get("role", "")
+
+        # Skip empty messages
+        if not content.strip():
+            continue
+
+        # Skip pure greeting messages (unless they're AI responses with product info)
+        if role == "human":
+            is_greeting_only = any(
+                greeting in content and len(content.split()) <= 4
+                for greeting in greeting_keywords
+            )
+            if is_greeting_only:
+                continue
+
+        # Include if message contains order-relevant keywords
+        is_relevant = any(keyword in content for keyword in order_keywords)
+
+        # Always include AI messages (they usually contain product info)
+        # Also include human messages that are relevant to order
+        if role == "ai" or is_relevant:
+            filtered_messages.append(msg)
+
+    # Extract product mentions from AI messages (which typically contain product details)
+    product_context = []
+    for msg in filtered_messages:
+        if msg.get("role") == "ai":
+            # AI messages often contain structured product information
+            content = msg.get("content", "")
+            if content and len(content) > 10:  # Skip very short AI responses
+                product_context.append(content)
+
+    # Build order-relevant history string
+    order_relevant_history = "\n".join(
+        [
+            f"{msg.get('role', 'unknown').upper()}: {msg.get('content', '')}"
+            for msg in filtered_messages
+        ]
+    )
+
+    logger.info(
+        f"[preprocess_order_context] Filtered {len(messages)} messages down to {len(filtered_messages)} order-relevant messages"
+    )
+
+    return {
+        "filtered_messages": filtered_messages,
+        "product_context": product_context,
+        "order_relevant_history": order_relevant_history,
+        "message_count": len(filtered_messages),
+    }
+
+
 @router.post("/order-confirmation", response_model=OrderConfirmationResponse)
 async def order_confirmation(request: OrderConfirmationRequest):
     """
-    Generate order confirmation from chat history using LLM
+    Generate order confirmation from chat history using LLM with intelligent preprocessing
 
     **Purpose:**
     Analyze recent conversation history to extract order details (product, quantity, price)
     and generate a structured order summary for the WhatsApp template.
 
     **Workflow:**
-    1. Retrieve last 15 messages from chat history
+    1. Retrieve last 15 messages from chat history (agent_messages table)
     2. Save user's confirmation message
-    3. Use LLM to extract order details from conversation
-    4. Generate order summary
-    5. Save order to customer_orders table
-    6. Return template body values for n8n
+    3. **Preprocess chat history** to filter only order-relevant messages:
+       - Removes greetings and unrelated queries
+       - Keeps product discussions, availability checks, pricing info
+       - Focuses on AI responses (product details) and human queries (order intent)
+    4. Use LLM to extract order details from filtered conversation
+    5. Generate order summary with multiple items support
+    6. Save order to customer_orders table (header + items)
+    7. Return template body values for n8n
 
     **Args:**
         request: OrderConfirmationRequest with message, phone_number, session_id
@@ -457,20 +545,25 @@ async def order_confirmation(request: OrderConfirmationRequest):
                 description="List of items being ordered. Each item should have product_name, quantity (default 1), unit_price, and discount."
             )
 
-        # Build conversation history for LLM
-        conversation_history = "\n".join(
-            [
-                f"{msg.get('role', 'unknown').upper()}: {msg.get('content', '')}"
-                for msg in messages
-            ]
+        # Preprocess conversation history to extract only order-relevant context
+        preprocessed_context = preprocess_order_context(
+            messages=messages,
+            current_message=request.message
         )
 
-        # Check if we have any conversation history
+        conversation_history = preprocessed_context["order_relevant_history"]
+        filtered_message_count = preprocessed_context["message_count"]
+
+        logger.info(
+            f"[order-confirmation] Preprocessed {len(messages)} messages -> {filtered_message_count} order-relevant messages"
+        )
+
+        # Check if we have any order-relevant conversation history
         if not conversation_history.strip():
-            logger.warning("No conversation history found for order confirmation")
+            logger.warning("No order-relevant conversation history found")
             raise HTTPException(
                 status_code=400,
-                detail="No conversation history found. Please ask about a product first before confirming an order."
+                detail="No product discussion found in recent conversation. Please ask about a product first before confirming an order."
             )
 
         # Use LLM with structured output to extract order details
@@ -484,13 +577,15 @@ async def order_confirmation(request: OrderConfirmationRequest):
         structured_llm = llm.with_structured_output(OrderExtraction)
 
         # Create extraction prompt for multiple items
-        extraction_prompt = f"""Analyze the conversation history and extract ALL order items the customer wants to order.
+        extraction_prompt = f"""Analyze the ORDER-RELEVANT conversation history below and extract ALL order items the customer wants to order.
+
+NOTE: The conversation history has been pre-filtered to include only product discussions, availability checks, and order-related messages. Greetings and unrelated queries have been removed.
 
 IMPORTANT: Extract MULTIPLE items if the customer is ordering more than one product. Each item should have:
-- product_name: Name of the product
+- product_name: Name of the product (extract from AI responses which contain product details)
 - quantity: Number of items (default to 1 if not mentioned for that specific product)
-- unit_price: Unit price in INR (numbers only, no ₹ symbol)
-- discount: Discount information if mentioned (e.g., "15% off" or "No discount")
+- unit_price: Unit price in INR (numbers only, no ₹ symbol) - look in AI responses for pricing
+- discount: Discount information if mentioned (e.g., "15% off" or "No discount") - look in AI responses
 
 Examples:
 - "I want 2 air staplers" → [{{product_name: "Air Stapler", quantity: 2, unit_price: "2499", discount: "No discount"}}]
@@ -500,12 +595,12 @@ Examples:
   ]
 - "Give me one pneumatic stapler" → [{{product_name: "Pneumatic Stapler", quantity: 1, unit_price: "4500", discount: "15% off"}}]
 
-**Conversation History:**
+**Order-Relevant Conversation History (Pre-filtered):**
 {conversation_history}
 
 **Current User Message:** {request.message}
 
-Extract ALL items from the conversation above. Look at the entire conversation history to identify all products and their details."""
+Extract ALL items from the conversation above. Focus on AI responses for product names, pricing, and discounts. Focus on HUMAN messages for quantities and order intent."""
 
         try:
             # Get structured output from LLM
