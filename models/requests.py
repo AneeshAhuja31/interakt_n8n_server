@@ -188,3 +188,119 @@ class OrderConfirmationRequest(BaseModel):
                 "session_id": "whatsapp_+919643524080",
             }
         }
+
+
+class CustomerFormRequest(BaseModel):
+    """Request to save customer form submission (name, email, phone)"""
+
+    whatsapp_phone_number: str = Field(
+        ...,
+        description="WhatsApp phone number of the person filling the form (from webhook)",
+        pattern=r"^\+?[1-9]\d{1,14}$",
+        examples=["+919643524080", "9643524080"],
+    )
+
+    entered_name: str = Field(
+        ...,
+        description="Name entered in the form by the user",
+        min_length=1,
+        examples=["Aneesh Ahuja", "John Doe"],
+    )
+
+    entered_email: str = Field(
+        ...,
+        description="Email address entered in the form by the user",
+        pattern=r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$",
+        examples=["aneesh@example.com", "john.doe@gmail.com"],
+    )
+
+    entered_phone_number: str = Field(
+        ...,
+        description="Phone number entered in the form by the user (may be different from WhatsApp number)",
+        pattern=r"^\+?[1-9]\d{1,14}$",
+        examples=["+919876543210", "9876543210"],
+    )
+
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Additional metadata for the form submission",
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "whatsapp_phone_number": "+919643524080",
+                "entered_name": "Aneesh Ahuja",
+                "entered_email": "aneesh@startrade.com",
+                "entered_phone_number": "+919876543210",
+                "metadata": {"source": "whatsapp_form"},
+            }
+        }
+
+
+class CustomerLocationFormRequest(BaseModel):
+    """Request to save customer location form submission"""
+
+    whatsapp_phone_number: str = Field(
+        ...,
+        description="WhatsApp phone number of the person filling the form (from webhook)",
+        pattern=r"^\+?[1-9]\d{1,14}$",
+        examples=["+919643524080", "9643524080"],
+    )
+
+    address: str = Field(
+        ...,
+        description="Full address entered in the form",
+        min_length=5,
+        examples=["123, MG Road, Sector 14", "Flat 402, Building A, Green Valley"],
+    )
+
+    city: Optional[str] = Field(
+        None,
+        description="City name",
+        examples=["Gurgaon", "Delhi", "Mumbai"],
+    )
+
+    state: Optional[str] = Field(
+        None,
+        description="State name",
+        examples=["Haryana", "Delhi", "Maharashtra"],
+    )
+
+    pincode: Optional[str] = Field(
+        None,
+        description="PIN code",
+        pattern=r"^\d{6}$",
+        examples=["122001", "110001"],
+    )
+
+    landmark: Optional[str] = Field(
+        None,
+        description="Nearby landmark for easy navigation",
+        examples=["Near City Mall", "Opposite Metro Station"],
+    )
+
+    location_type: str = Field(
+        default="delivery",
+        description="Type of location (delivery, billing, etc.)",
+        examples=["delivery", "billing"],
+    )
+
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Additional metadata for the location submission",
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "whatsapp_phone_number": "+919643524080",
+                "address": "123, MG Road, Sector 14",
+                "city": "Gurgaon",
+                "state": "Haryana",
+                "pincode": "122001",
+                "landmark": "Near Cyber Hub",
+                "location_type": "delivery",
+                "metadata": {"verified": True},
+            }
+        }

@@ -312,3 +312,150 @@ class OrderConfirmationResponse(BaseModel):
                 "message": "Order confirmed successfully",
             }
         }
+
+
+class LatestOrderResponse(BaseModel):
+    """Response for getting latest order by phone number"""
+
+    success: bool = Field(..., description="Whether operation was successful")
+    order: OrderSummary = Field(..., description="Latest order details with multiple items")
+    order_summary_text: str = Field(..., description="Order summary as single-line text without newlines")
+    message: str = Field(default="Latest order retrieved successfully", description="Status message")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "order": {
+                    "items": [
+                        {
+                            "product_name": "Air Stapler",
+                            "quantity": 2,
+                            "unit_price": "2499",
+                            "discount": "15% off",
+                            "subtotal": "4998",
+                            "item_id": "ITEM_20250110_143052_789_001",
+                        },
+                        {
+                            "product_name": "Nails Box",
+                            "quantity": 1,
+                            "unit_price": "500",
+                            "discount": "No discount",
+                            "subtotal": "500",
+                            "item_id": "ITEM_20250110_143052_789_002",
+                        },
+                    ],
+                    "total_price": "5498",
+                    "order_id": "ORD_20250110_143052_789",
+                },
+                "order_summary_text": "Order ID: ORD_20250110_143052_789 | Items: Air Stapler x2 (₹2499 each, 15% off), Nails Box x1 (₹500 each, No discount) | Total: ₹5498",
+                "message": "Latest order retrieved successfully",
+            }
+        }
+
+
+class CustomerFormSubmission(BaseModel):
+    """Customer form submission data"""
+
+    form_id: str = Field(..., description="Unique form ID with WhatsApp phone + timestamp")
+    whatsapp_phone_number: str = Field(..., description="WhatsApp phone number")
+    entered_name: str = Field(..., description="Name entered in form")
+    entered_email: str = Field(..., description="Email entered in form")
+    entered_phone_number: str = Field(..., description="Phone number entered in form")
+    created_at: Optional[str] = Field(None, description="Form submission timestamp")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "form_id": "FORM_9643524080_20250110_143052_789",
+                "whatsapp_phone_number": "+919643524080",
+                "entered_name": "Aneesh Ahuja",
+                "entered_email": "aneesh@startrade.com",
+                "entered_phone_number": "+919876543210",
+                "created_at": "2025-01-10T14:30:52.789Z",
+                "metadata": {"source": "whatsapp_form"},
+            }
+        }
+
+
+class CustomerFormResponse(BaseModel):
+    """Response from customer form endpoints"""
+
+    success: bool = Field(..., description="Whether operation was successful")
+    form_submission: CustomerFormSubmission = Field(..., description="Customer form submission data")
+    message: str = Field(default="Form saved successfully", description="Status message")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "form_submission": {
+                    "form_id": "FORM_9643524080_20250110_143052_789",
+                    "whatsapp_phone_number": "+919643524080",
+                    "entered_name": "Aneesh Ahuja",
+                    "entered_email": "aneesh@startrade.com",
+                    "entered_phone_number": "+919876543210",
+                    "created_at": "2025-01-10T14:30:52.789Z",
+                },
+                "message": "Form saved successfully",
+            }
+        }
+
+
+class CustomerLocationSubmission(BaseModel):
+    """Customer location submission data"""
+
+    location_id: str = Field(..., description="Unique location ID with WhatsApp phone + timestamp")
+    whatsapp_phone_number: str = Field(..., description="WhatsApp phone number")
+    address: str = Field(..., description="Full address")
+    city: Optional[str] = Field(None, description="City")
+    state: Optional[str] = Field(None, description="State")
+    pincode: Optional[str] = Field(None, description="PIN code")
+    landmark: Optional[str] = Field(None, description="Landmark")
+    location_type: str = Field(default="delivery", description="Location type")
+    created_at: Optional[str] = Field(None, description="Location submission timestamp")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "location_id": "LOCATION_9643524080_20250110_143052_789",
+                "whatsapp_phone_number": "+919643524080",
+                "address": "123, MG Road, Sector 14",
+                "city": "Gurgaon",
+                "state": "Haryana",
+                "pincode": "122001",
+                "landmark": "Near Cyber Hub",
+                "location_type": "delivery",
+                "created_at": "2025-01-10T14:30:52.789Z",
+                "metadata": {"verified": True},
+            }
+        }
+
+
+class CustomerLocationFormResponse(BaseModel):
+    """Response from customer location form endpoints"""
+
+    success: bool = Field(..., description="Whether operation was successful")
+    location_submission: CustomerLocationSubmission = Field(..., description="Customer location submission data")
+    message: str = Field(default="Location saved successfully", description="Status message")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "location_submission": {
+                    "location_id": "LOCATION_9643524080_20250110_143052_789",
+                    "whatsapp_phone_number": "+919643524080",
+                    "address": "123, MG Road, Sector 14",
+                    "city": "Gurgaon",
+                    "state": "Haryana",
+                    "pincode": "122001",
+                    "landmark": "Near Cyber Hub",
+                    "location_type": "delivery",
+                    "created_at": "2025-01-10T14:30:52.789Z",
+                },
+                "message": "Location saved successfully",
+            }
+        }

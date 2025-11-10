@@ -472,6 +472,7 @@ class SupabaseClient:
         self,
         order_id: str,
         items: List[Dict[str, Any]],
+        phone_number: str,
     ) -> List[Dict[str, Any]]:
         """
         Create multiple order items (batch insert)
@@ -486,11 +487,12 @@ class SupabaseClient:
                 - discount: Discount information
                 - subtotal: Item subtotal (unit_price × quantity)
                 - metadata: Optional additional data
+            phone_number: Customer phone number (for easy querying by customer)
 
         Returns:
             List of created order item records
         """
-        # Add order_id to each item
+        # Add order_id and phone_number to each item
         items_data = []
         for item in items:
             item_data = {
@@ -501,6 +503,7 @@ class SupabaseClient:
                 "unit_price": item.get("unit_price"),
                 "discount": item.get("discount", "No discount"),
                 "subtotal": item.get("subtotal"),
+                "phone_number": phone_number,
                 "metadata": item.get("metadata", {}),
             }
             items_data.append(item_data)
@@ -577,7 +580,7 @@ class SupabaseClient:
         self, phone_number: str, limit: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Get orders for a customer
+        Get orders for a customer (from old customer_orders table)
 
         Args:
             phone_number: Customer phone number
@@ -590,6 +593,304 @@ class SupabaseClient:
             self.client.table("customer_orders")
             .select("*")
             .eq("phone_number", phone_number)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        return response.data if response.data else []
+
+    async def get_customer_order_headers(
+        self, phone_number: str, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Get order headers for a customer (from new order_headers table)
+
+        Args:
+            phone_number: Customer phone number
+            limit: Number of orders to retrieve
+
+        Returns:
+            List of order header records
+        """
+        response = (
+            self.client.table("order_headers")
+            .select("*")
+            .eq("phone_number", phone_number)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        return response.data if response.data else []
+
+    async def get_customer_order_items(
+        self, phone_number: str, limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Get order items for a customer (from order_items table)
+        Useful for quickly retrieving recent orders by phone number
+
+        Args:
+            phone_number: Customer phone number
+            limit: Number of order items to retrieve
+
+        Returns:
+            List of order item records ordered by creation time
+        """
+        response = (
+            self.client.table("order_items")
+            .select("*")
+            .eq("phone_number", phone_number)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        return response.data if response.data else []
+
+    async def get_recent_order_by_id_prefix(
+        self, phone_number: str, order_id_prefix: str = "ORD_"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent order for a customer matching an order ID prefix
+
+        Args:
+            phone_number: Customer phone number
+            order_id_prefix: Order ID prefix to match (default: "ORD_")
+
+        Returns:
+            Most recent order header or None if not found
+        """
+        response = (
+            self.client.table("order_headers")
+            .select("*")
+            .eq("phone_number", phone_number)
+            .like("order_id", f"{order_id_prefix}%")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+        return None
+
+    # ============================================================
+    # CUSTOMER FORM SUBMISSIONS (Name, Email, Phone)
+    # ============================================================
+
+    async def save_customer_form(
+        self,
+        whatsapp_phone_number: str,
+        entered_name: str,
+        entered_email: str,
+        entered_phone_number: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Save customer form submission (name, email, phone number)
+
+        The form is filled by a WhatsApp user, and they provide their details.
+        Unique ID is based on WhatsApp phone number + timestamp.
+
+        Args:
+            whatsapp_phone_number: WhatsApp phone number (from webhook)
+            entered_name: Name entered in the form
+            entered_email: Email entered in the form
+            entered_phone_number: Phone number entered in the form
+            metadata: Additional metadata
+
+        Returns:
+            Created form submission record with form_id
+        """
+        from datetime import datetime
+
+        # Generate form ID with WhatsApp phone + timestamp
+        now = datetime.now()
+        timestamp = now.strftime('%Y%m%d_%H%M%S')
+        milliseconds = now.strftime('%f')[:3]
+        # Clean phone number for ID (remove + and country code for readability)
+        clean_phone = whatsapp_phone_number.lstrip("+").lstrip("91")[-10:]  # Last 10 digits
+        form_id = f"FORM_{clean_phone}_{timestamp}_{milliseconds}"
+
+        form_data = {
+            "form_id": form_id,
+            "whatsapp_phone_number": whatsapp_phone_number,
+            "entered_name": entered_name,
+            "entered_email": entered_email,
+            "entered_phone_number": entered_phone_number,
+            "metadata": metadata or {},
+        }
+
+        response = self.client.table("customer_form_submissions").insert(form_data).execute()
+
+        if response.data and len(response.data) > 0:
+            logger.info(f"Customer form saved: {form_id} for WhatsApp {whatsapp_phone_number}")
+            return response.data[0]
+
+        raise Exception("Failed to save customer form")
+
+    async def get_customer_form(
+        self, whatsapp_phone_number: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent form submission for a WhatsApp number
+
+        Args:
+            whatsapp_phone_number: WhatsApp phone number
+
+        Returns:
+            Most recent form submission record or None if not found
+        """
+        response = (
+            self.client.table("customer_form_submissions")
+            .select("*")
+            .eq("whatsapp_phone_number", whatsapp_phone_number)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+        return None
+
+    async def get_customer_form_history(
+        self, whatsapp_phone_number: str, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Get form submission history for a WhatsApp number
+
+        Args:
+            whatsapp_phone_number: WhatsApp phone number
+            limit: Number of records to retrieve
+
+        Returns:
+            List of form submissions ordered by creation time (newest first)
+        """
+        response = (
+            self.client.table("customer_form_submissions")
+            .select("*")
+            .eq("whatsapp_phone_number", whatsapp_phone_number)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        return response.data if response.data else []
+
+    # ============================================================
+    # CUSTOMER LOCATION SUBMISSIONS
+    # ============================================================
+
+    async def save_customer_location_form(
+        self,
+        whatsapp_phone_number: str,
+        address: str,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        pincode: Optional[str] = None,
+        landmark: Optional[str] = None,
+        location_type: str = "delivery",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Save customer location form submission
+
+        The location form is filled by a WhatsApp user.
+        Unique ID is based on WhatsApp phone number + timestamp.
+
+        Args:
+            whatsapp_phone_number: WhatsApp phone number (from webhook)
+            address: Full address entered in form
+            city: City name
+            state: State name
+            pincode: PIN code
+            landmark: Nearby landmark
+            location_type: Type of location (delivery, billing, etc.)
+            metadata: Additional metadata
+
+        Returns:
+            Created location submission record with location_id
+        """
+        from datetime import datetime
+
+        # Generate location ID with WhatsApp phone + timestamp
+        now = datetime.now()
+        timestamp = now.strftime('%Y%m%d_%H%M%S')
+        milliseconds = now.strftime('%f')[:3]
+        # Clean phone number for ID (remove + and country code for readability)
+        clean_phone = whatsapp_phone_number.lstrip("+").lstrip("91")[-10:]  # Last 10 digits
+        location_id = f"LOCATION_{clean_phone}_{timestamp}_{milliseconds}"
+
+        location_data = {
+            "location_id": location_id,
+            "whatsapp_phone_number": whatsapp_phone_number,
+            "address": address,
+            "city": city,
+            "state": state,
+            "pincode": pincode,
+            "landmark": landmark,
+            "location_type": location_type,
+            "metadata": metadata or {},
+        }
+
+        response = self.client.table("customer_location_submissions").insert(location_data).execute()
+
+        if response.data and len(response.data) > 0:
+            logger.info(f"Customer location saved: {location_id} for WhatsApp {whatsapp_phone_number}")
+            return response.data[0]
+
+        raise Exception("Failed to save customer location")
+
+    async def get_customer_location_form(
+        self, whatsapp_phone_number: str, location_type: str = "delivery"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent location submission for a WhatsApp number
+
+        Args:
+            whatsapp_phone_number: WhatsApp phone number
+            location_type: Type of location (delivery, billing, etc.)
+
+        Returns:
+            Most recent location submission record or None if not found
+        """
+        response = (
+            self.client.table("customer_location_submissions")
+            .select("*")
+            .eq("whatsapp_phone_number", whatsapp_phone_number)
+            .eq("location_type", location_type)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+
+        return None
+
+    async def get_customer_location_form_history(
+        self, whatsapp_phone_number: str, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Get location submission history for a WhatsApp number
+
+        Args:
+            whatsapp_phone_number: WhatsApp phone number
+            limit: Number of records to retrieve
+
+        Returns:
+            List of location submissions ordered by creation time (newest first)
+        """
+        response = (
+            self.client.table("customer_location_submissions")
+            .select("*")
+            .eq("whatsapp_phone_number", whatsapp_phone_number)
             .order("created_at", desc=True)
             .limit(limit)
             .execute()

@@ -93,7 +93,7 @@ def embed_text():
     print(f"\nDone! Total {total_rows} product embeddings uploaded to Qdrant.")
 
 
-def test_query(query_text: str, limit: int = 5):
+def test_query(query_text: str, limit: int = 20):
     print(f"\nSearching for: '{query_text}'")
 
     query_vector = embeddings.embed_query(query_text)
@@ -117,5 +117,5 @@ def test_query(query_text: str, limit: int = 5):
         if payload.get("cloudinary_url"):
             print(f"   Image: {payload['cloudinary_url']}")
 
-test_query("mujhe r 13 chahiye")
+test_query("i need debron drill")
 # embed_text()

@@ -4,7 +4,14 @@ Replaces the n8n AI Agent cluster (8 nodes) with a single HTTP endpoint
 """
 
 from fastapi import APIRouter, HTTPException
-from models.requests import AgentRequest, AgentRequestFromN8N, SaveMessageRequest, OrderConfirmationRequest
+from models.requests import (
+    AgentRequest,
+    AgentRequestFromN8N,
+    SaveMessageRequest,
+    OrderConfirmationRequest,
+    CustomerFormRequest,
+    CustomerLocationFormRequest,
+)
 from models.responses import (
     AgentResponse,
     WhatsAppTemplatePayload,
@@ -12,6 +19,11 @@ from models.responses import (
     SaveMessageResponse,
     OrderConfirmationResponse,
     OrderSummary,
+    LatestOrderResponse,
+    CustomerFormSubmission,
+    CustomerFormResponse,
+    CustomerLocationSubmission,
+    CustomerLocationFormResponse,
 )
 from agents.availability_agent import get_availability_agent
 from db.supabase_client import get_supabase_client
@@ -648,19 +660,22 @@ Extract ALL items from the conversation above. Focus on AI responses for product
             }]
             total_price = 0
 
-        # Generate order ID and item IDs
+        # Generate order ID and item IDs with millisecond precision
         from datetime import datetime
         import uuid
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        order_id = f"ORD_{timestamp}"
+        # Format: ORD_YYYYMMDD_HHMMSS_mmm (e.g., ORD_20250110_143052_789)
+        now = datetime.now()
+        timestamp = now.strftime('%Y%m%d_%H%M%S')
+        milliseconds = now.strftime('%f')[:3]  # First 3 digits of microseconds
+        order_id = f"ORD_{timestamp}_{milliseconds}"
 
         # Create OrderItem objects
         from models.responses import OrderItem
         order_item_objects = []
 
         for idx, item in enumerate(order_items):
-            item_id = f"ITEM_{timestamp}_{idx+1:03d}"
+            item_id = f"ITEM_{timestamp}_{milliseconds}_{idx+1:03d}"
             order_item_objects.append(
                 OrderItem(
                     product_name=item["product_name"],
@@ -697,6 +712,7 @@ Extract ALL items from the conversation above. Focus on AI responses for product
             await supabase_client.create_order_items(
                 order_id=order_id,
                 items=order_items,
+                phone_number=phone_number,
             )
             logger.info(f"Saved {len(order_items)} items to database for order {order_id}")
 
@@ -750,3 +766,398 @@ Extract ALL items from the conversation above. Focus on AI responses for product
     except Exception as e:
         logger.error(f"[/agent/order-confirmation] Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Order confirmation error: {str(e)}")
+
+
+@router.get("/latest-order/{phone_number}", response_model=LatestOrderResponse)
+async def get_latest_order(phone_number: str):
+    """
+    Get the latest order for a customer by phone number
+
+    **Purpose:**
+    Retrieve the most recent order with all items and generate a single-line summary.
+
+    **Workflow:**
+    1. Ensure phone number has country code
+    2. Get latest order header from order_headers table
+    3. Get all items for that order from order_items table
+    4. Build OrderSummary with multiple items
+    5. Generate single-line order summary text (no newlines)
+
+    **Args:**
+        phone_number: Customer phone number
+
+    **Returns:**
+        LatestOrderResponse with order details and summary text
+
+    **Example:**
+        GET /agent/latest-order/+919643524080
+        GET /agent/latest-order/9643524080
+    """
+    try:
+        # Ensure phone number has country code
+        if not phone_number.startswith("+"):
+            phone_number = f"+91{phone_number}"
+
+        if not supabase_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Database client not available. Check Supabase configuration.",
+            )
+
+        # Get latest order header
+        order_headers = await supabase_client.get_customer_order_headers(
+            phone_number=phone_number,
+            limit=1
+        )
+
+        if not order_headers or len(order_headers) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No orders found for phone number {phone_number}"
+            )
+
+        latest_order_header = order_headers[0]
+        order_id = latest_order_header.get("order_id")
+
+        logger.info(f"[/agent/latest-order] Found order {order_id} for {phone_number}")
+
+        # Get all items for this order
+        response = (
+            supabase_client.client.table("order_items")
+            .select("*")
+            .eq("order_id", order_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+
+        if not response.data or len(response.data) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No items found for order {order_id}"
+            )
+
+        order_items_data = response.data
+
+        # Build OrderItem objects
+        from models.responses import OrderItem
+        order_items = []
+        for item_data in order_items_data:
+            order_items.append(
+                OrderItem(
+                    product_name=item_data.get("product_name", ""),
+                    quantity=item_data.get("quantity", 1),
+                    unit_price=str(item_data.get("unit_price", "0")),
+                    discount=item_data.get("discount", "No discount"),
+                    subtotal=str(item_data.get("subtotal", "0")),
+                    item_id=item_data.get("item_id"),
+                )
+            )
+
+        # Build OrderSummary
+        total_price = latest_order_header.get("total_price", "0")
+        order_summary = OrderSummary(
+            items=order_items,
+            total_price=str(total_price),
+            order_id=order_id,
+        )
+
+        # Generate single-line summary text (no newlines)
+        items_summary_parts = []
+        for item in order_items:
+            item_text = f"{item.product_name} x{item.quantity} (₹{item.unit_price} each"
+            if item.discount and item.discount != "No discount":
+                item_text += f", {item.discount}"
+            item_text += ")"
+            items_summary_parts.append(item_text)
+
+        items_summary = ", ".join(items_summary_parts)
+        order_summary_text = f"Order ID: {order_id} | Items: {items_summary} | Total: ₹{total_price}"
+
+        logger.info(f"[/agent/latest-order] Generated summary for {order_id}")
+
+        return LatestOrderResponse(
+            success=True,
+            order=order_summary,
+            order_summary_text=order_summary_text,
+            message="Latest order retrieved successfully",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[/agent/latest-order] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.post("/customer-form", response_model=CustomerFormResponse)
+async def save_customer_form(request: CustomerFormRequest):
+    """
+    Save customer form submission (name, email, phone number)
+
+    **Purpose:**
+    Store form data submitted by WhatsApp user with timestamped form ID.
+
+    **Form Fields:**
+    - Name (entered by user)
+    - Email (entered by user)
+    - Phone number (entered by user - may differ from WhatsApp number)
+
+    **Unique ID Format:**
+    FORM_{last10digitsOfWhatsAppNumber}_{YYYYMMDD_HHMMSS_mmm}
+    Example: FORM_9643524080_20250110_143052_789
+
+    **Args:**
+        request: CustomerFormRequest with whatsapp_phone_number, entered_name, entered_email, entered_phone_number
+
+    **Returns:**
+        CustomerFormResponse with form submission details and form_id
+    """
+    try:
+        # Ensure WhatsApp phone number has country code
+        whatsapp_phone = request.whatsapp_phone_number
+        if not whatsapp_phone.startswith("+"):
+            whatsapp_phone = f"+91{whatsapp_phone}"
+
+        if not supabase_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Database client not available. Check Supabase configuration.",
+            )
+
+        # Save form to database
+        try:
+            form_record = await supabase_client.save_customer_form(
+                whatsapp_phone_number=whatsapp_phone,
+                entered_name=request.entered_name,
+                entered_email=request.entered_email,
+                entered_phone_number=request.entered_phone_number,
+                metadata=request.metadata,
+            )
+
+            logger.info(
+                f"[/agent/customer-form] Form saved: {form_record.get('form_id')} for WhatsApp {whatsapp_phone}"
+            )
+
+            # Convert to CustomerFormSubmission model
+            form_submission = CustomerFormSubmission(
+                form_id=form_record.get("form_id"),
+                whatsapp_phone_number=form_record.get("whatsapp_phone_number"),
+                entered_name=form_record.get("entered_name"),
+                entered_email=form_record.get("entered_email"),
+                entered_phone_number=form_record.get("entered_phone_number"),
+                created_at=form_record.get("created_at"),
+                metadata=form_record.get("metadata"),
+            )
+
+            return CustomerFormResponse(
+                success=True,
+                form_submission=form_submission,
+                message="Form saved successfully",
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to save form: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to save form: {str(e)}"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[/agent/customer-form] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.get("/customer-form/{whatsapp_phone_number}", response_model=CustomerFormResponse)
+async def get_customer_form(whatsapp_phone_number: str):
+    """
+    Get the most recent form submission by WhatsApp phone number
+
+    **Args:**
+        whatsapp_phone_number: WhatsApp phone number
+
+    **Returns:**
+        CustomerFormResponse with most recent form submission
+    """
+    try:
+        # Ensure phone number has country code
+        if not whatsapp_phone_number.startswith("+"):
+            whatsapp_phone_number = f"+91{whatsapp_phone_number}"
+
+        if not supabase_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Database client not available. Check Supabase configuration.",
+            )
+
+        # Get form from database
+        form_record = await supabase_client.get_customer_form(whatsapp_phone_number)
+
+        if not form_record:
+            raise HTTPException(
+                status_code=404, detail=f"No form found for WhatsApp {whatsapp_phone_number}"
+            )
+
+        # Convert to CustomerFormSubmission model
+        form_submission = CustomerFormSubmission(
+            form_id=form_record.get("form_id"),
+            whatsapp_phone_number=form_record.get("whatsapp_phone_number"),
+            entered_name=form_record.get("entered_name"),
+            entered_email=form_record.get("entered_email"),
+            entered_phone_number=form_record.get("entered_phone_number"),
+            created_at=form_record.get("created_at"),
+            metadata=form_record.get("metadata"),
+        )
+
+        return CustomerFormResponse(
+            success=True,
+            form_submission=form_submission,
+            message="Form retrieved successfully",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[/agent/customer-form] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.post("/customer-location-form", response_model=CustomerLocationFormResponse)
+async def save_customer_location_form(request: CustomerLocationFormRequest):
+    """
+    Save customer location form submission
+
+    **Purpose:**
+    Store location data submitted by WhatsApp user with timestamped location ID.
+
+    **Unique ID Format:**
+    LOCATION_{last10digitsOfWhatsAppNumber}_{YYYYMMDD_HHMMSS_mmm}
+    Example: LOCATION_9643524080_20250110_143052_789
+
+    **Args:**
+        request: CustomerLocationFormRequest with whatsapp_phone_number, address, city, state, etc.
+
+    **Returns:**
+        CustomerLocationFormResponse with location submission details and location_id
+    """
+    try:
+        # Ensure WhatsApp phone number has country code
+        whatsapp_phone = request.whatsapp_phone_number
+        if not whatsapp_phone.startswith("+"):
+            whatsapp_phone = f"+91{whatsapp_phone}"
+
+        if not supabase_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Database client not available. Check Supabase configuration.",
+            )
+
+        # Save location to database
+        try:
+            location_record = await supabase_client.save_customer_location_form(
+                whatsapp_phone_number=whatsapp_phone,
+                address=request.address,
+                city=request.city,
+                state=request.state,
+                pincode=request.pincode,
+                landmark=request.landmark,
+                location_type=request.location_type,
+                metadata=request.metadata,
+            )
+
+            logger.info(
+                f"[/agent/customer-location-form] Location saved: {location_record.get('location_id')} for WhatsApp {whatsapp_phone}"
+            )
+
+            # Convert to CustomerLocationSubmission model
+            location_submission = CustomerLocationSubmission(
+                location_id=location_record.get("location_id"),
+                whatsapp_phone_number=location_record.get("whatsapp_phone_number"),
+                address=location_record.get("address"),
+                city=location_record.get("city"),
+                state=location_record.get("state"),
+                pincode=location_record.get("pincode"),
+                landmark=location_record.get("landmark"),
+                location_type=location_record.get("location_type"),
+                created_at=location_record.get("created_at"),
+                metadata=location_record.get("metadata"),
+            )
+
+            return CustomerLocationFormResponse(
+                success=True,
+                location_submission=location_submission,
+                message="Location saved successfully",
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to save location: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to save location: {str(e)}"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[/agent/customer-location-form] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+
+@router.get("/customer-location-form/{whatsapp_phone_number}", response_model=CustomerLocationFormResponse)
+async def get_customer_location_form(whatsapp_phone_number: str, location_type: str = "delivery"):
+    """
+    Get the most recent location submission by WhatsApp phone number
+
+    **Args:**
+        whatsapp_phone_number: WhatsApp phone number
+        location_type: Type of location (delivery, billing, etc.)
+
+    **Returns:**
+        CustomerLocationFormResponse with most recent location submission
+    """
+    try:
+        # Ensure phone number has country code
+        if not whatsapp_phone_number.startswith("+"):
+            whatsapp_phone_number = f"+91{whatsapp_phone_number}"
+
+        if not supabase_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Database client not available. Check Supabase configuration.",
+            )
+
+        # Get location from database
+        location_record = await supabase_client.get_customer_location_form(
+            whatsapp_phone_number, location_type
+        )
+
+        if not location_record:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No {location_type} location found for WhatsApp {whatsapp_phone_number}",
+            )
+
+        # Convert to CustomerLocationSubmission model
+        location_submission = CustomerLocationSubmission(
+            location_id=location_record.get("location_id"),
+            whatsapp_phone_number=location_record.get("whatsapp_phone_number"),
+            address=location_record.get("address"),
+            city=location_record.get("city"),
+            state=location_record.get("state"),
+            pincode=location_record.get("pincode"),
+            landmark=location_record.get("landmark"),
+            location_type=location_record.get("location_type"),
+            created_at=location_record.get("created_at"),
+            metadata=location_record.get("metadata"),
+        )
+
+        return CustomerLocationFormResponse(
+            success=True,
+            location_submission=location_submission,
+            message="Location retrieved successfully",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[/agent/customer-location-form] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
