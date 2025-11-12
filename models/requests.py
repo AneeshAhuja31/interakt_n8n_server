@@ -304,3 +304,20 @@ class CustomerLocationFormRequest(BaseModel):
                 "metadata": {"verified": True},
             }
         }
+
+
+class OrderModificationRequest(BaseModel):
+    """Request for modifying an existing order"""
+
+    message: str = Field(..., description="Customer's modification request message")
+    phone_number: str = Field(..., description="Customer phone number")
+    session_id: Optional[str] = Field(None, description="Session ID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "message": "Change quantity to 2",
+                "phone_number": "+919643524080",
+                "session_id": "whatsapp_+919643524080",
+            }
+        }

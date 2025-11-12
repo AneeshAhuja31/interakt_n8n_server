@@ -20,6 +20,7 @@ class IntentClassification(BaseModel):
         "welcome_greeting",
         "availability_check_with_link",
         "order_confirmation_simple",
+        "order_modification",
         "order_address_collect",
         "order_payment_choice",
         "order_payment_confirmed",
@@ -126,21 +127,28 @@ Your job is to analyze the customer's message and classify it into one of the pr
 
 3. **order_confirmation_simple**: User wants to confirm order, place order, book something (includes "order kardo", "book", etc.)
 
-4. **order_address_collect**: User is providing or being asked for delivery address, pincode, city, full name for delivery
+4. **order_modification**: User wants to modify their existing order. **IMPORTANT**: Only classify as this intent when user EXPLICITLY mentions changing specific order details:
+   - Changing quantity of an item ("change quantity to 2", "make it 3 pieces", "reduce to 1")
+   - Removing a specific product from order ("remove the drill", "cancel the stapler item", "don't want the wrench")
+   - Canceling entire order ("cancel my order", "cancel the whole order", "don't want anything")
+   - **DO NOT** classify as order_modification if user just says "modify", "change", "edit" without specifying WHAT to change
+   - **DO NOT** classify as order_modification if user wants to ADD new items (that should be availability_check_with_link)
 
-5. **order_payment_choice**: User discussing payment method (COD, UPI, bank transfer, cash on delivery, pay on delivery)
+5. **order_address_collect**: User is providing or being asked for delivery address, pincode, city, full name for delivery
 
-6. **order_payment_confirmed**: User confirming payment is done ("paid", "payment done", "transfer ho gaya", "I have paid")
+6. **order_payment_choice**: User discussing payment method (COD, UPI, bank transfer, cash on delivery, pay on delivery)
 
-7. **out_of_stock_simple**: Discussion about out of stock items, product not available
+7. **order_payment_confirmed**: User confirming payment is done ("paid", "payment done", "transfer ho gaya", "I have paid")
 
-8. **product_availability_query**: When user is already in availability_check_with_link flow and sends a product name or inquiry
+8. **out_of_stock_simple**: Discussion about out of stock items, product not available
 
-9. **order_confirmation_approval**: When user is in order_confirmation_simple flow and responds with yes/confirm/ok/done
+9. **product_availability_query**: When user is already in availability_check_with_link flow and sends a product name or inquiry
 
-10. **general_text_message**: Any other text message that doesn't fit the above categories
+10. **order_confirmation_approval**: When user is in order_confirmation_simple flow and responds with yes/confirm/ok/done
 
-11. **unknown**: When message type is not text or intent cannot be determined
+11. **general_text_message**: Any other text message that doesn't fit the above categories
+
+12. **unknown**: When message type is not text or intent cannot be determined
 
 **Context-Aware Rules:**
 - If active_flow is "availability_check_with_link" and message_type is "text", likely intent is "product_availability_query"

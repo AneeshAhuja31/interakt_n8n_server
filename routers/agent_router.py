@@ -9,6 +9,7 @@ from models.requests import (
     AgentRequestFromN8N,
     SaveMessageRequest,
     OrderConfirmationRequest,
+    OrderModificationRequest,
     CustomerFormRequest,
     CustomerLocationFormRequest,
 )
@@ -18,6 +19,7 @@ from models.responses import (
     ProductMatch,
     SaveMessageResponse,
     OrderConfirmationResponse,
+    OrderModificationResponse,
     OrderSummary,
     LatestOrderResponse,
     CustomerFormSubmission,
@@ -30,6 +32,7 @@ from db.supabase_client import get_supabase_client
 from config import settings
 import time
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -392,8 +395,6 @@ def extract_prices_from_messages(messages: list) -> dict:
     Returns:
         dict mapping product names to their pricing info {product_name: {unit_price, discount, discount_percent}}
     """
-    import re
-
     price_map = {}
 
     # Regex patterns for price extraction
@@ -882,7 +883,6 @@ Now extract ONLY the items from the CURRENT order. Focus on the most recent AI p
                         unit_price_int = int(item.unit_price) if item.unit_price.isdigit() else 0
 
                         # Parse discount percentage from discount text (e.g., "25% off" -> 25)
-                        import re
                         discount_match = re.search(r'(\d+)\s*%', discount_text)
                         if discount_match:
                             discount_percent = int(discount_match.group(1))
@@ -1105,6 +1105,497 @@ Subtotal: ₹{order_summary.original_price}"""
     except Exception as e:
         logger.error(f"[/agent/order-confirmation] Error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Order confirmation error: {str(e)}")
+
+
+@router.post("/modify-order", response_model=OrderModificationResponse)
+async def modify_order(request: OrderModificationRequest):
+    """
+    Modify an existing order (change quantity, remove item, or cancel order)
+
+    **Purpose:**
+    Allow customers to modify their most recent order by:
+    - Changing quantity of an item
+    - Removing a specific item
+    - Canceling the entire order
+
+    **Workflow:**
+    1. Get latest order for customer
+    2. Extract modification action from user message using LLM
+    3. Apply modification (change quantity / remove item / cancel)
+    4. Delete old order from database
+    5. Create new order with modifications (if not canceled)
+    6. Return old and new order details
+
+    **Args:**
+        request: OrderModificationRequest with message, phone_number, session_id
+
+    **Returns:**
+        OrderModificationResponse with old/new orders and status message
+    """
+    start_time = time.time()
+
+    try:
+        # Ensure phone number has country code
+        phone_number = request.phone_number
+        if not phone_number.startswith("+"):
+            phone_number = f"+91{phone_number}"
+
+        session_id = request.session_id or f"whatsapp_{phone_number}"
+
+        logger.info(f"[/agent/modify-order] Processing modification request from {phone_number}: {request.message}")
+
+        if not supabase_client:
+            raise HTTPException(
+                status_code=503,
+                detail="Database client not available",
+            )
+
+        # Get latest order
+        latest_order_data = await supabase_client.get_latest_order_by_phone(phone_number)
+
+        if not latest_order_data or not latest_order_data.get("header"):
+            raise HTTPException(
+                status_code=404,
+                detail="No recent order found for this customer"
+            )
+
+        old_order_header = latest_order_data["header"]
+        old_order_items = latest_order_data["items"]
+        old_order_id = old_order_header["order_id"]
+
+        logger.info(f"[/agent/modify-order] Found order {old_order_id} with {len(old_order_items)} items")
+
+        # Extract modification action using LLM
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        from models.responses import ModificationAction
+
+        llm = ChatGoogleGenerativeAI(
+            model=settings.GEMINI_MODEL,
+            temperature=0.1,
+            google_api_key=settings.GOOGLE_API_KEY,
+        )
+
+        structured_llm = llm.with_structured_output(ModificationAction)
+
+        # Build current order context
+        order_context = "\n".join([
+            f"- {item['product_name']} (Quantity: {item['quantity']}, Price: ₹{item['unit_price']}, Subtotal: ₹{item['subtotal']})"
+            for item in old_order_items
+        ])
+
+        extraction_prompt = f"""Analyze the customer's modification request and extract the action they want to perform.
+
+**Current Order (Order ID: {old_order_id}):**
+{order_context}
+
+**Customer's Modification Request:** {request.message}
+
+**Your Task:**
+Determine what modification the customer wants:
+1. **change_quantity**: Customer wants to change the quantity of a specific item
+   - Extract product name and new quantity
+2. **remove_item**: Customer wants to remove a specific product from the order
+   - Extract product name to remove
+3. **cancel_order**: Customer wants to cancel the entire order
+   - No specific product needed
+
+**Important:**
+- Match product names flexibly (e.g., "stapler" matches "Air Stapler")
+- For quantity changes, extract the new total quantity (not increment/decrement)
+- Provide clear reasoning for your decision
+
+Now extract the modification action."""
+
+        try:
+            modification_action = await structured_llm.ainvoke(extraction_prompt)
+            logger.info(f"[/agent/modify-order] Extracted action: {modification_action.action_type}")
+        except Exception as e:
+            logger.error(f"[/agent/modify-order] LLM extraction failed: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail="Could not understand modification request. Please specify what you want to change."
+            )
+
+        # Apply modification based on action type
+        if modification_action.action_type == "cancel_order":
+            # Delete entire order
+            deleted = await supabase_client.delete_order_complete(old_order_id)
+            if not deleted:
+                raise HTTPException(status_code=500, detail="Failed to delete order")
+
+            # Create old order summary with discount info
+            from models.responses import OrderItem
+
+            # Parse discount fields for old order items (for backward compatibility)
+            for item in old_order_items:
+                if "discount_percent" not in item or item.get("discount_percent", 0) == 0:
+                    discount_text = item.get("discount", "No discount")
+                    discount_match = re.search(r'(\d+)\s*%', discount_text)
+                    if discount_match:
+                        discount_percent = int(discount_match.group(1))
+                        unit_price = int(item["unit_price"])
+                        quantity = item["quantity"]
+
+                        # Calculate discount amounts
+                        discount_amount = int(unit_price * discount_percent / 100)
+                        final_unit_price = unit_price - discount_amount
+                        item_discount_amount = discount_amount * quantity
+
+                        # Add calculated fields
+                        item["discount_percent"] = discount_percent
+                        item["discount_amount"] = discount_amount
+                        item["final_unit_price"] = final_unit_price
+                        item["item_discount_amount"] = item_discount_amount
+
+            old_original_price = sum(int(item["unit_price"]) * item["quantity"] for item in old_order_items)
+            old_total_discount = sum(item.get("item_discount_amount", 0) for item in old_order_items)
+
+            old_order_item_objects = [
+                OrderItem(
+                    product_name=item["product_name"],
+                    quantity=item["quantity"],
+                    unit_price=item["unit_price"],
+                    discount=item.get("discount", "No discount"),
+                    subtotal=item["subtotal"],
+                    item_id=item.get("item_id", ""),
+                    discount_percent=item.get("discount_percent", 0),
+                    discount_amount=item.get("discount_amount", 0),
+                    final_unit_price=item.get("final_unit_price", int(item["unit_price"])),
+                    item_discount_amount=item.get("item_discount_amount", 0),
+                    price_verified=item.get("price_verified", False),
+                )
+                for item in old_order_items
+            ]
+
+            old_order_summary = OrderSummary(
+                items=old_order_item_objects,
+                total_price=old_order_header["total_price"],
+                order_id=old_order_id,
+                total_discount=old_total_discount,
+                original_price=old_original_price,
+            )
+
+            return OrderModificationResponse(
+                success=True,
+                action_type="cancel_order",
+                old_order=old_order_summary,
+                new_order=None,
+                message=f"Order {old_order_id} has been canceled successfully.",
+                session_id=session_id,
+            )
+
+        elif modification_action.action_type in ["change_quantity", "remove_item"]:
+            # Find matching item
+            target_product = modification_action.product_name.lower() if modification_action.product_name else ""
+            matched_item = None
+            matched_index = -1
+
+            for idx, item in enumerate(old_order_items):
+                item_name = item["product_name"].lower()
+                if target_product in item_name or item_name in target_product:
+                    matched_item = item
+                    matched_index = idx
+                    break
+
+            if not matched_item:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Product '{modification_action.product_name}' not found in your order"
+                )
+
+            # Create modified items list
+            new_items = []
+            for idx, item in enumerate(old_order_items):
+                if idx == matched_index:
+                    if modification_action.action_type == "change_quantity":
+                        # Update quantity and recalculate subtotal with discount
+                        new_qty = modification_action.new_quantity
+                        unit_price = int(item["unit_price"])
+
+                        # Parse discount - try from discount_percent field first, then from discount text
+                        discount_percent = item.get("discount_percent", 0)
+
+                        # If discount_percent not available, parse from discount text
+                        if discount_percent == 0 or discount_percent is None:
+                            discount_text = item.get("discount", "No discount")
+                            discount_match = re.search(r'(\d+)\s*%', discount_text)
+                            if discount_match:
+                                discount_percent = int(discount_match.group(1))
+                                logger.info(
+                                    f"[/agent/modify-order] Parsed discount {discount_percent}% from text '{discount_text}'"
+                                )
+
+                        # Calculate discount amount per unit
+                        discount_amount = 0
+                        if discount_percent > 0:
+                            discount_amount = int(unit_price * discount_percent / 100)
+
+                        # Calculate final prices
+                        final_unit_price = unit_price - discount_amount
+                        new_subtotal = final_unit_price * new_qty
+                        item_discount_amount = discount_amount * new_qty  # Total discount for this item
+
+                        logger.info(
+                            f"[/agent/modify-order] Item: {item['product_name']}, Qty: {new_qty}, "
+                            f"Unit Price: ₹{unit_price}, Discount: {discount_percent}%, "
+                            f"Discount Amount: ₹{discount_amount}, Final Unit Price: ₹{final_unit_price}, "
+                            f"Subtotal: ₹{new_subtotal}"
+                        )
+
+                        modified_item = item.copy()
+                        modified_item["quantity"] = new_qty
+                        modified_item["subtotal"] = str(new_subtotal)
+                        modified_item["discount_percent"] = discount_percent
+                        modified_item["discount_amount"] = discount_amount
+                        modified_item["final_unit_price"] = final_unit_price
+                        modified_item["item_discount_amount"] = item_discount_amount
+                        new_items.append(modified_item)
+                    # If remove_item, skip this item (don't add to new_items)
+                else:
+                    # For unmodified items, ensure discount fields are populated
+                    unmodified_item = item.copy()
+
+                    # Parse discount if not already present
+                    if "discount_percent" not in unmodified_item or unmodified_item.get("discount_percent", 0) == 0:
+                        discount_text = unmodified_item.get("discount", "No discount")
+                        discount_match = re.search(r'(\d+)\s*%', discount_text)
+                        if discount_match:
+                            discount_percent = int(discount_match.group(1))
+                            unit_price = int(unmodified_item["unit_price"])
+                            quantity = unmodified_item["quantity"]
+
+                            # Calculate discount amounts
+                            discount_amount = int(unit_price * discount_percent / 100)
+                            final_unit_price = unit_price - discount_amount
+                            item_discount_amount = discount_amount * quantity
+
+                            # Add calculated fields
+                            unmodified_item["discount_percent"] = discount_percent
+                            unmodified_item["discount_amount"] = discount_amount
+                            unmodified_item["final_unit_price"] = final_unit_price
+                            unmodified_item["item_discount_amount"] = item_discount_amount
+
+                            logger.info(
+                                f"[/agent/modify-order] Parsed discount for unmodified item '{unmodified_item['product_name']}': "
+                                f"{discount_percent}% discount, item_discount_amount: ₹{item_discount_amount}"
+                            )
+
+                    new_items.append(unmodified_item)
+
+            if len(new_items) == 0:
+                # All items removed, cancel order instead
+                deleted = await supabase_client.delete_order_complete(old_order_id)
+
+                from models.responses import OrderItem
+
+                # Parse discount fields for old order items (for backward compatibility)
+                for item in old_order_items:
+                    if "discount_percent" not in item or item.get("discount_percent", 0) == 0:
+                        discount_text = item.get("discount", "No discount")
+                        discount_match = re.search(r'(\d+)\s*%', discount_text)
+                        if discount_match:
+                            discount_percent = int(discount_match.group(1))
+                            unit_price = int(item["unit_price"])
+                            quantity = item["quantity"]
+
+                            # Calculate discount amounts
+                            discount_amount = int(unit_price * discount_percent / 100)
+                            final_unit_price = unit_price - discount_amount
+                            item_discount_amount = discount_amount * quantity
+
+                            # Add calculated fields
+                            item["discount_percent"] = discount_percent
+                            item["discount_amount"] = discount_amount
+                            item["final_unit_price"] = final_unit_price
+                            item["item_discount_amount"] = item_discount_amount
+
+                old_original_price = sum(int(item["unit_price"]) * item["quantity"] for item in old_order_items)
+                old_total_discount = sum(item.get("item_discount_amount", 0) for item in old_order_items)
+
+                old_order_item_objects = [
+                    OrderItem(
+                        product_name=item["product_name"],
+                        quantity=item["quantity"],
+                        unit_price=item["unit_price"],
+                        discount=item.get("discount", "No discount"),
+                        subtotal=item["subtotal"],
+                        item_id=item.get("item_id", ""),
+                        discount_percent=item.get("discount_percent", 0),
+                        discount_amount=item.get("discount_amount", 0),
+                        final_unit_price=item.get("final_unit_price", int(item["unit_price"])),
+                        item_discount_amount=item.get("item_discount_amount", 0),
+                        price_verified=item.get("price_verified", False),
+                    )
+                    for item in old_order_items
+                ]
+
+                old_order_summary = OrderSummary(
+                    items=old_order_item_objects,
+                    total_price=old_order_header["total_price"],
+                    order_id=old_order_id,
+                    total_discount=old_total_discount,
+                    original_price=old_original_price,
+                )
+
+                return OrderModificationResponse(
+                    success=True,
+                    action_type="cancel_order",
+                    old_order=old_order_summary,
+                    new_order=None,
+                    message="All items removed. Order has been canceled.",
+                    session_id=session_id,
+                )
+
+            # Calculate new totals (with discount tracking)
+            new_total_price = sum(int(item["subtotal"]) for item in new_items)
+            new_original_price = sum(int(item["unit_price"]) * item["quantity"] for item in new_items)
+            new_total_discount = sum(item.get("item_discount_amount", 0) for item in new_items)
+
+            logger.info(
+                f"[/agent/modify-order] New order totals - Original: ₹{new_original_price}, "
+                f"Discount: ₹{new_total_discount}, Final: ₹{new_total_price}"
+            )
+
+            # Delete old order
+            deleted = await supabase_client.delete_order_complete(old_order_id)
+            if not deleted:
+                logger.warning(f"[/agent/modify-order] Failed to delete old order {old_order_id}")
+
+            # Generate new order ID
+            from datetime import datetime
+            now = datetime.now()
+            timestamp = now.strftime('%Y%m%d_%H%M%S')
+            milliseconds = now.strftime('%f')[:3]
+            new_order_id = f"ORD_{timestamp}_{milliseconds}"
+
+            # Add item IDs to new items
+            for idx, item in enumerate(new_items):
+                item["item_id"] = f"ITEM_{timestamp}_{milliseconds}_{idx+1:03d}"
+
+            # Create new order in database
+            await supabase_client.create_order_header(
+                order_id=new_order_id,
+                session_id=session_id,
+                phone_number=phone_number,
+                total_price=str(new_total_price),
+                metadata={"item_count": len(new_items), "modified_from": old_order_id},
+            )
+
+            await supabase_client.create_order_items(
+                order_id=new_order_id,
+                items=new_items,
+                phone_number=phone_number,
+            )
+
+            logger.info(f"[/agent/modify-order] Created new order {new_order_id} (modified from {old_order_id})")
+
+            # Build response with old and new order summaries
+            from models.responses import OrderItem
+
+            # Parse discount fields for old order items (for backward compatibility)
+            for item in old_order_items:
+                if "discount_percent" not in item or item.get("discount_percent", 0) == 0:
+                    discount_text = item.get("discount", "No discount")
+                    discount_match = re.search(r'(\d+)\s*%', discount_text)
+                    if discount_match:
+                        discount_percent = int(discount_match.group(1))
+                        unit_price = int(item["unit_price"])
+                        quantity = item["quantity"]
+
+                        # Calculate discount amounts
+                        discount_amount = int(unit_price * discount_percent / 100)
+                        final_unit_price = unit_price - discount_amount
+                        item_discount_amount = discount_amount * quantity
+
+                        # Add calculated fields
+                        item["discount_percent"] = discount_percent
+                        item["discount_amount"] = discount_amount
+                        item["final_unit_price"] = final_unit_price
+                        item["item_discount_amount"] = item_discount_amount
+
+            # Calculate old order discount totals
+            old_original_price = sum(int(item["unit_price"]) * item["quantity"] for item in old_order_items)
+            old_total_discount = sum(item.get("item_discount_amount", 0) for item in old_order_items)
+
+            old_order_item_objects = [
+                OrderItem(
+                    product_name=item["product_name"],
+                    quantity=item["quantity"],
+                    unit_price=item["unit_price"],
+                    discount=item.get("discount", "No discount"),
+                    subtotal=item["subtotal"],
+                    item_id=item.get("item_id", ""),
+                    discount_percent=item.get("discount_percent", 0),
+                    discount_amount=item.get("discount_amount", 0),
+                    final_unit_price=item.get("final_unit_price", int(item["unit_price"])),
+                    item_discount_amount=item.get("item_discount_amount", 0),
+                    price_verified=item.get("price_verified", False),
+                )
+                for item in old_order_items
+            ]
+
+            new_order_item_objects = [
+                OrderItem(
+                    product_name=item["product_name"],
+                    quantity=item["quantity"],
+                    unit_price=item["unit_price"],
+                    discount=item.get("discount", "No discount"),
+                    subtotal=item["subtotal"],
+                    item_id=item.get("item_id", ""),
+                    discount_percent=item.get("discount_percent", 0),
+                    discount_amount=item.get("discount_amount", 0),
+                    final_unit_price=item.get("final_unit_price", int(item["unit_price"])),
+                    item_discount_amount=item.get("item_discount_amount", 0),
+                    price_verified=item.get("price_verified", False),
+                )
+                for item in new_items
+            ]
+
+            old_order_summary = OrderSummary(
+                items=old_order_item_objects,
+                total_price=old_order_header["total_price"],
+                order_id=old_order_id,
+                total_discount=old_total_discount,
+                original_price=old_original_price,
+            )
+
+            new_order_summary = OrderSummary(
+                items=new_order_item_objects,
+                total_price=str(new_total_price),
+                order_id=new_order_id,
+                total_discount=new_total_discount,
+                original_price=new_original_price,
+            )
+
+            action_message = ""
+            if modification_action.action_type == "change_quantity":
+                if new_total_discount > 0:
+                    action_message = f"Quantity of {matched_item['product_name']} changed to {modification_action.new_quantity}. Original price: ₹{new_original_price}, Discount: ₹{new_total_discount}, Final total: ₹{new_total_price}"
+                else:
+                    action_message = f"Quantity of {matched_item['product_name']} changed to {modification_action.new_quantity}. New total: ₹{new_total_price}"
+            else:
+                if new_total_discount > 0:
+                    action_message = f"{matched_item['product_name']} removed from order. Original price: ₹{new_original_price}, Discount: ₹{new_total_discount}, Final total: ₹{new_total_price}"
+                else:
+                    action_message = f"{matched_item['product_name']} removed from order. New total: ₹{new_total_price}"
+
+            return OrderModificationResponse(
+                success=True,
+                action_type=modification_action.action_type,
+                old_order=old_order_summary,
+                new_order=new_order_summary,
+                message=action_message,
+                session_id=session_id,
+            )
+
+        else:
+            raise HTTPException(status_code=400, detail="Invalid modification action")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[/agent/modify-order] Error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Order modification error: {str(e)}")
 
 
 @router.get("/latest-order/{phone_number}", response_model=LatestOrderResponse)

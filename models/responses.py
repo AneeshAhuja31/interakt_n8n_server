@@ -496,3 +496,75 @@ class CustomerLocationFormResponse(BaseModel):
                 "message": "Location saved successfully",
             }
         }
+
+
+class ModificationAction(BaseModel):
+    """Extracted modification action from user message"""
+
+    action_type: Literal["change_quantity", "remove_item", "cancel_order"] = Field(
+        ..., description="Type of modification action"
+    )
+    product_name: Optional[str] = Field(
+        None, description="Product name to modify (for change_quantity or remove_item)"
+    )
+    new_quantity: Optional[int] = Field(
+        None, description="New quantity (for change_quantity action)", ge=1
+    )
+    reasoning: str = Field(..., description="Explanation of the modification action")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "action_type": "change_quantity",
+                "product_name": "Air Stapler",
+                "new_quantity": 2,
+                "reasoning": "User wants to change the quantity of Air Stapler to 2 pieces",
+            }
+        }
+
+
+class OrderModificationResponse(BaseModel):
+    """Response from order modification endpoint"""
+
+    success: bool = Field(..., description="Whether modification was successful")
+    action_type: str = Field(..., description="Type of modification performed")
+    old_order: Optional[OrderSummary] = Field(None, description="Original order before modification")
+    new_order: Optional[OrderSummary] = Field(None, description="New order after modification (None if canceled)")
+    message: str = Field(..., description="Status message for the user")
+    session_id: str = Field(..., description="Session ID")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "action_type": "change_quantity",
+                "old_order": {
+                    "items": [
+                        {
+                            "product_name": "Air Stapler",
+                            "quantity": 1,
+                            "unit_price": "2499",
+                            "discount": "15% off",
+                            "subtotal": "2124",
+                        }
+                    ],
+                    "total_price": "2124",
+                    "order_id": "ORD_20250113_001",
+                },
+                "new_order": {
+                    "items": [
+                        {
+                            "product_name": "Air Stapler",
+                            "quantity": 2,
+                            "unit_price": "2499",
+                            "discount": "15% off",
+                            "subtotal": "4248",
+                        }
+                    ],
+                    "total_price": "4248",
+                    "order_id": "ORD_20250113_002",
+                },
+                "message": "Order updated successfully! Quantity changed to 2.",
+                "session_id": "whatsapp_+919643524080",
+            }
+        }

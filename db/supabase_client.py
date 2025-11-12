@@ -677,6 +677,106 @@ class SupabaseClient:
 
         return None
 
+    async def get_latest_order_by_phone(
+        self, phone_number: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent order (header + items) for a customer by phone number
+
+        Args:
+            phone_number: Customer phone number
+
+        Returns:
+            Dict with order header and items, or None if no order found
+        """
+        # Get most recent order header
+        header_response = (
+            self.client.table("order_headers")
+            .select("*")
+            .eq("phone_number", phone_number)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        if not header_response.data or len(header_response.data) == 0:
+            return None
+
+        order_header = header_response.data[0]
+        order_id = order_header["order_id"]
+
+        # Get associated items
+        items_response = (
+            self.client.table("order_items")
+            .select("*")
+            .eq("order_id", order_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+
+        return {
+            "header": order_header,
+            "items": items_response.data if items_response.data else [],
+        }
+
+    async def delete_order_header(self, order_id: str) -> bool:
+        """
+        Delete an order header by order ID
+
+        Args:
+            order_id: Order ID to delete
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            response = (
+                self.client.table("order_headers")
+                .delete()
+                .eq("order_id", order_id)
+                .execute()
+            )
+            return True
+        except Exception as e:
+            print(f"Error deleting order header {order_id}: {e}")
+            return False
+
+    async def delete_order_items(self, order_id: str) -> bool:
+        """
+        Delete all order items for a given order ID
+
+        Args:
+            order_id: Order ID whose items should be deleted
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            response = (
+                self.client.table("order_items")
+                .delete()
+                .eq("order_id", order_id)
+                .execute()
+            )
+            return True
+        except Exception as e:
+            print(f"Error deleting order items for {order_id}: {e}")
+            return False
+
+    async def delete_order_complete(self, order_id: str) -> bool:
+        """
+        Delete an order completely (both header and all items)
+
+        Args:
+            order_id: Order ID to delete
+
+        Returns:
+            True if both header and items deleted successfully
+        """
+        items_deleted = await self.delete_order_items(order_id)
+        header_deleted = await self.delete_order_header(order_id)
+        return items_deleted and header_deleted
+
     # ============================================================
     # CUSTOMER FORM SUBMISSIONS (Name, Email, Phone)
     # ============================================================
