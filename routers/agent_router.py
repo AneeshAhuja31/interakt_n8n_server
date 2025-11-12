@@ -369,6 +369,96 @@ async def save_message(request: SaveMessageRequest):
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 
+def extract_prices_from_messages(messages: list) -> dict:
+    """
+    Extract exact numerical prices from conversation messages using regex parsing
+
+    This function scans AI responses for price information and extracts:
+    - Product names
+    - Unit prices (₹ or Rs amounts)
+    - Discount percentages
+
+    Args:
+        messages: List of message dicts from chat history
+
+    Returns:
+        dict mapping product names to their pricing info {product_name: {unit_price, discount, discount_percent}}
+    """
+    import re
+
+    price_map = {}
+
+    # Regex patterns for price extraction
+    # Matches: ₹2499, Rs 2499, Rs. 2499, ₹ 2,499, etc.
+    price_pattern = r'(?:₹|Rs\.?|INR)\s*([0-9,]+(?:\.[0-9]{2})?)'
+
+    # Discount pattern: 10% off, 10% discount, 15 percent off, etc.
+    discount_pattern = r'(\d+)\s*(?:%|percent)\s*(?:off|discount)'
+
+    # Product name patterns (common tools/products)
+    product_keywords = [
+        'stapler', 'nail', 'gun', 'hammer', 'drill', 'wrench', 'bolt',
+        'screwdriver', 'plier', 'saw', 'cutter', 'tool', 'box', 'set',
+        'kit', 'pneumatic', 'air', 'electric', 'manual'
+    ]
+
+    for msg in messages:
+        if msg.get("role") != "ai":
+            continue
+
+        content = msg.get("content", "")
+        if not content or len(content) < 10:
+            continue
+
+        # Extract all prices in this message
+        prices = re.findall(price_pattern, content, re.IGNORECASE)
+        prices = [p.replace(',', '') for p in prices]  # Remove commas
+
+        # Extract discount if mentioned
+        discount_match = re.search(discount_pattern, content, re.IGNORECASE)
+        discount_percent = int(discount_match.group(1)) if discount_match else 0
+        discount_text = f"{discount_percent}% off" if discount_percent > 0 else "No discount"
+
+        # Try to identify product names in the message
+        content_lower = content.lower()
+
+        # Look for product mentions
+        for keyword in product_keywords:
+            if keyword in content_lower:
+                # Try to extract product name around the keyword
+                # Common patterns: "Air Stapler", "Pneumatic Nail Gun", etc.
+                product_pattern = r'\b([A-Z][a-z]*(?:\s+[A-Z][a-z]*)*\s*' + re.escape(keyword.title()) + r'(?:\s+[A-Z][a-z]*)*)\b'
+                product_match = re.search(product_pattern, content)
+
+                if product_match:
+                    product_name = product_match.group(1).strip()
+                else:
+                    # Fallback: capitalize the keyword
+                    product_name = keyword.title()
+
+                # Associate the first price found with this product
+                if prices and product_name not in price_map:
+                    unit_price = int(float(prices[0]))
+
+                    # Calculate discounted price if applicable
+                    final_price = unit_price
+                    if discount_percent > 0:
+                        final_price = int(unit_price * (100 - discount_percent) / 100)
+
+                    price_map[product_name.lower()] = {
+                        'product_name': product_name,
+                        'unit_price': unit_price,
+                        'discount_percent': discount_percent,
+                        'discount_text': discount_text,
+                        'final_unit_price': final_price
+                    }
+                    logger.info(f"[extract_prices] Found: {product_name} = ₹{unit_price} ({discount_text})")
+                    prices.pop(0)  # Remove used price
+
+    logger.info(f"[extract_prices] Extracted prices for {len(price_map)} products")
+    return price_map
+
+
 def preprocess_order_context(messages: list, current_message: str) -> dict:
     """
     Preprocess chat history to extract only order-relevant context with intelligent filtering
@@ -652,10 +742,15 @@ async def order_confirmation(request: OrderConfirmationRequest):
 
         conversation_history = preprocessed_context["order_relevant_history"]
         filtered_message_count = preprocessed_context["message_count"]
+        filtered_messages = preprocessed_context["filtered_messages"]
 
         logger.info(
             f"[order-confirmation] Preprocessed {len(messages)} messages -> {filtered_message_count} order-relevant messages"
         )
+
+        # Extract exact numerical prices from filtered messages using regex parsing
+        price_map = extract_prices_from_messages(filtered_messages)
+        logger.info(f"[order-confirmation] Extracted {len(price_map)} product prices from conversation")
 
         # Check if we have any order-relevant conversation history
         if not conversation_history.strip():
@@ -737,30 +832,79 @@ Now extract ONLY the items from the CURRENT order. Focus on the most recent AI p
             if not order_data.items or len(order_data.items) == 0:
                 raise ValueError("No items extracted from conversation")
 
-            # Process each item and calculate subtotals
+            # Process each item and calculate subtotals with price verification
             order_items = []
             total_price = 0
+            total_discount_amount = 0
 
             for item in order_data.items:
-                # Calculate subtotal for this item
-                try:
-                    unit_price_int = int(item.unit_price) if item.unit_price.isdigit() else 0
-                    quantity = item.quantity or 1
-                    subtotal = unit_price_int * quantity
-                except (ValueError, AttributeError):
-                    subtotal = 0
+                quantity = item.quantity or 1
+                product_name_lower = item.product_name.lower()
+
+                # Try to find matching price from extracted price map
+                unit_price_int = 0
+                discount_percent = 0
+                discount_text = item.discount or "No discount"
+                price_verified = False
+
+                # Search for product in price_map (fuzzy matching)
+                for key, price_info in price_map.items():
+                    if key in product_name_lower or product_name_lower in key:
+                        # Found a match! Use the extracted price
+                        unit_price_int = price_info['unit_price']
+                        discount_percent = price_info['discount_percent']
+                        discount_text = price_info['discount_text']
+                        price_verified = True
+                        logger.info(
+                            f"[price_verification] Matched '{item.product_name}' with extracted price: ₹{unit_price_int} ({discount_text})"
+                        )
+                        break
+
+                # Fallback: Use LLM-extracted price if no match found
+                if not price_verified:
+                    try:
+                        unit_price_int = int(item.unit_price) if item.unit_price.isdigit() else 0
+                        logger.warning(
+                            f"[price_verification] No extracted price found for '{item.product_name}', using LLM price: ₹{unit_price_int}"
+                        )
+                    except (ValueError, AttributeError):
+                        unit_price_int = 0
+                        logger.error(f"[price_verification] Failed to parse price for '{item.product_name}'")
+
+                # Calculate discount amount
+                discount_amount = 0
+                if discount_percent > 0:
+                    discount_amount = int(unit_price_int * discount_percent / 100)
+
+                # Calculate final unit price after discount
+                final_unit_price = unit_price_int - discount_amount
+
+                # Calculate subtotal: final_unit_price × quantity
+                subtotal = final_unit_price * quantity
+
+                # Calculate item discount amount
+                item_discount_amount = discount_amount * quantity
 
                 order_items.append({
                     "product_name": item.product_name,
-                    "quantity": item.quantity or 1,
-                    "unit_price": item.unit_price,
-                    "discount": item.discount or "No discount",
-                    "subtotal": str(subtotal),
+                    "quantity": quantity,
+                    "unit_price": str(unit_price_int),  # Original price
+                    "discount": discount_text,
+                    "discount_percent": discount_percent,
+                    "discount_amount": discount_amount,  # Discount per unit
+                    "final_unit_price": final_unit_price,  # Price after discount per unit
+                    "subtotal": str(subtotal),  # Final amount for this item (after discount × quantity)
+                    "item_discount_amount": item_discount_amount,  # Total discount for this item
+                    "price_verified": price_verified,
                 })
 
                 total_price += subtotal
+                total_discount_amount += item_discount_amount
 
-            logger.info(f"Processed {len(order_items)} items, total price: {total_price}")
+            logger.info(
+                f"[order-confirmation] Processed {len(order_items)} items | "
+                f"Total: ₹{total_price} | Total Discount: ₹{total_discount_amount}"
+            )
 
         except Exception as e:
             logger.error(f"LLM extraction failed: {e}", exc_info=True)
@@ -784,12 +928,20 @@ Now extract ONLY the items from the CURRENT order. Focus on the most recent AI p
         milliseconds = now.strftime('%f')[:3]  # First 3 digits of microseconds
         order_id = f"ORD_{timestamp}_{milliseconds}"
 
-        # Create OrderItem objects
+        # Create OrderItem objects with detailed pricing breakdown
         from models.responses import OrderItem
         order_item_objects = []
+        original_total = 0
 
         for idx, item in enumerate(order_items):
             item_id = f"ITEM_{timestamp}_{milliseconds}_{idx+1:03d}"
+
+            # Calculate original price for this item
+            unit_price_int = int(item["unit_price"])
+            quantity = item["quantity"]
+            item_original_price = unit_price_int * quantity
+            original_total += item_original_price
+
             order_item_objects.append(
                 OrderItem(
                     product_name=item["product_name"],
@@ -798,16 +950,28 @@ Now extract ONLY the items from the CURRENT order. Focus on the most recent AI p
                     discount=item["discount"],
                     subtotal=item["subtotal"],
                     item_id=item_id,
+                    discount_percent=item.get("discount_percent", 0),
+                    discount_amount=item.get("discount_amount", 0),
+                    final_unit_price=item.get("final_unit_price", unit_price_int),
+                    item_discount_amount=item.get("item_discount_amount", 0),
+                    price_verified=item.get("price_verified", False),
                 )
             )
             # Add item_id to the dict for database insertion
             item["item_id"] = item_id
 
-        # Create OrderSummary object with multiple items
+        # Create OrderSummary object with multiple items and detailed pricing
         order_summary = OrderSummary(
             items=order_item_objects,
             total_price=str(total_price),
             order_id=order_id,
+            total_discount=total_discount_amount,
+            original_price=original_total,
+        )
+
+        logger.info(
+            f"[order-confirmation] Order Summary: Original Price: ₹{original_total}, "
+            f"Total Discount: ₹{total_discount_amount}, Final Price: ₹{total_price}"
         )
 
         # Save order to database (new multi-item structure)
@@ -833,32 +997,64 @@ Now extract ONLY the items from the CURRENT order. Focus on the most recent AI p
         except Exception as e:
             logger.warning(f"Failed to save order to database: {e}")
 
-        # Save order summary as AI message (with all items)
-        items_text = ", ".join([
-            f"{item.product_name} x{item.quantity}"
+        # Save order summary as AI message (with all items and detailed pricing)
+        items_text = "\n".join([
+            f"• {item.product_name} (x{item.quantity}) - ₹{item.unit_price} each"
+            + (f" - {item.discount} = ₹{item.final_unit_price}" if item.discount_percent and item.discount_percent > 0 else "")
+            + f" | Subtotal: ₹{item.subtotal}"
             for item in order_summary.items
         ])
-        order_summary_text = f"Order Summary: {items_text} | Total: ₹{order_summary.total_price}"
+
+        # Build comprehensive order summary text
+        order_summary_text = f"""Order Confirmed! 🎉
+
+Order ID: {order_id}
+
+Items:
+{items_text}
+
+---
+Subtotal: ₹{order_summary.original_price}"""
+
+        if order_summary.total_discount and order_summary.total_discount > 0:
+            order_summary_text += f"\nDiscount: -₹{order_summary.total_discount}"
+
+        order_summary_text += f"\nTotal to Pay: ₹{order_summary.total_price}"
+
         try:
             await supabase_client.add_message(
                 session_id=session_id,
                 role="ai",
                 content=order_summary_text,
                 message_type="order_summary",
-                metadata={"order_id": order_id, "item_count": len(order_summary.items)},
+                metadata={
+                    "order_id": order_id,
+                    "item_count": len(order_summary.items),
+                    "total_price": total_price,
+                    "total_discount": total_discount_amount,
+                    "original_price": original_total,
+                },
             )
         except Exception as e:
             logger.warning(f"Failed to save order summary message: {e}")
 
-        # Prepare template body values for WhatsApp
-        # Format: "Product1 (x2), Product2 (x1)", "Total", "Order ID"
+        # Prepare template body values for WhatsApp with detailed pricing
+        # Format: "Product1 (x2), Product2 (x1)", "Original Price", "Discount", "Total to Pay", "Order ID"
         items_summary = ", ".join([
             f"{item.product_name} (x{item.quantity})"
             for item in order_summary.items
         ])
+
+        # Create detailed pricing summary
+        original_price_text = f"₹{order_summary.original_price}"
+        discount_text = f"₹{order_summary.total_discount}" if order_summary.total_discount and order_summary.total_discount > 0 else "₹0"
+        total_text = f"₹{order_summary.total_price}"
+
         template_body_values = [
             items_summary,
-            f"₹{order_summary.total_price}",
+            original_price_text,
+            discount_text,
+            total_text,
             order_id,
         ]
 

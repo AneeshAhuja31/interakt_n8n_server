@@ -220,10 +220,15 @@ class OrderItem(BaseModel):
 
     product_name: str = Field(..., description="Product name from conversation")
     quantity: int = Field(default=1, description="Number of items", ge=1)
-    unit_price: str = Field(..., description="Price per unit (formatted string)")
-    discount: str = Field(default="No discount", description="Discount information")
-    subtotal: str = Field(..., description="Item subtotal (unit_price × quantity)")
+    unit_price: str = Field(..., description="Original price per unit before discount")
+    discount: str = Field(default="No discount", description="Discount information (e.g., '15% off')")
+    subtotal: str = Field(..., description="Final amount to pay for this item (after discount × quantity)")
     item_id: Optional[str] = Field(None, description="Generated item ID")
+    discount_percent: Optional[int] = Field(None, description="Discount percentage (0-100)")
+    discount_amount: Optional[int] = Field(None, description="Discount amount per unit")
+    final_unit_price: Optional[int] = Field(None, description="Final price per unit after discount")
+    item_discount_amount: Optional[int] = Field(None, description="Total discount for this item (discount × quantity)")
+    price_verified: Optional[bool] = Field(None, description="Whether price was extracted from conversation")
 
     class Config:
         json_schema_extra = {
@@ -232,8 +237,13 @@ class OrderItem(BaseModel):
                 "quantity": 2,
                 "unit_price": "2499",
                 "discount": "15% off",
-                "subtotal": "4998",
+                "discount_percent": 15,
+                "discount_amount": 375,
+                "final_unit_price": 2124,
+                "subtotal": "4248",
+                "item_discount_amount": 750,
                 "item_id": "ITEM_20250109_001",
+                "price_verified": True,
             }
         }
 
@@ -242,8 +252,10 @@ class OrderSummary(BaseModel):
     """Extracted order details from chat history (supports multiple items)"""
 
     items: List[OrderItem] = Field(..., description="List of items in the order")
-    total_price: str = Field(..., description="Total order price (sum of all items)")
+    total_price: str = Field(..., description="Total amount to pay (after all discounts)")
     order_id: Optional[str] = Field(None, description="Generated order ID")
+    total_discount: Optional[int] = Field(None, description="Total discount amount across all items")
+    original_price: Optional[int] = Field(None, description="Original price before discounts")
 
     class Config:
         json_schema_extra = {
@@ -254,7 +266,10 @@ class OrderSummary(BaseModel):
                         "quantity": 2,
                         "unit_price": "2499",
                         "discount": "15% off",
-                        "subtotal": "4998",
+                        "discount_percent": 15,
+                        "final_unit_price": 2124,
+                        "subtotal": "4248",
+                        "item_discount_amount": 750,
                     },
                     {
                         "product_name": "Nails Box",
@@ -264,7 +279,9 @@ class OrderSummary(BaseModel):
                         "subtotal": "500",
                     },
                 ],
-                "total_price": "5498",
+                "total_price": "4748",
+                "total_discount": 750,
+                "original_price": 5498,
                 "order_id": "ORD_20250109_001",
             }
         }
