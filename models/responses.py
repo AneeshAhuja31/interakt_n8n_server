@@ -299,6 +299,9 @@ class OrderConfirmationResponse(BaseModel):
     message: str = Field(
         default="Order confirmed successfully", description="Status message"
     )
+    items_extracted: bool = Field(
+        default=True, description="Whether items were successfully extracted from conversation (False when using fallback)"
+    )
 
     class Config:
         json_schema_extra = {
@@ -327,6 +330,7 @@ class OrderConfirmationResponse(BaseModel):
                 "template_body_values": ["Air Stapler (x2), Nails Box (x1)", "₹5498", "ORD_20250109_001"],
                 "session_id": "whatsapp_+919643524080",
                 "message": "Order confirmed successfully",
+                "items_extracted": True,
             }
         }
 

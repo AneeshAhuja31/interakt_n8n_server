@@ -575,10 +575,15 @@ def preprocess_order_context(messages: list, current_message: str) -> dict:
                     filtered_messages.append(msg)
 
     # If we have very few filtered messages, fall back to broader filtering
+    # This can happen when user tries to reconfirm an already confirmed order
     if len(filtered_messages) < 2:
         logger.warning("[preprocess] Too few filtered messages, using fallback filtering")
+        # If we had an order boundary, look at ALL messages (including before boundary)
+        # This handles the case where user confirms again immediately after previous order
+        messages_for_fallback = list(reversed(messages)) if last_order_boundary_idx >= 0 else messages_oldest_first
+
         filtered_messages = []
-        for msg in messages_oldest_first:
+        for msg in messages_for_fallback:
             content = msg.get("content", "").lower()
             role = msg.get("role", "")
 
@@ -823,6 +828,9 @@ HUMAN: I'll take one [RECENT]
 
 Now extract ONLY the items from the CURRENT order. Focus on the most recent AI product response(s) and the customer's latest confirmation."""
 
+        # Track whether items were successfully extracted
+        items_extracted_successfully = True
+
         try:
             # Get structured output from LLM
             order_data = await structured_llm.ainvoke(extraction_prompt)
@@ -864,8 +872,18 @@ Now extract ONLY the items from the CURRENT order. Focus on the most recent AI p
                 if not price_verified:
                     try:
                         unit_price_int = int(item.unit_price) if item.unit_price.isdigit() else 0
+
+                        # Parse discount percentage from discount text (e.g., "25% off" -> 25)
+                        import re
+                        discount_match = re.search(r'(\d+)\s*%', discount_text)
+                        if discount_match:
+                            discount_percent = int(discount_match.group(1))
+                            logger.info(
+                                f"[price_verification] Parsed discount {discount_percent}% from '{discount_text}'"
+                            )
+
                         logger.warning(
-                            f"[price_verification] No extracted price found for '{item.product_name}', using LLM price: ₹{unit_price_int}"
+                            f"[price_verification] No extracted price found for '{item.product_name}', using LLM price: ₹{unit_price_int} with {discount_percent}% discount"
                         )
                     except (ValueError, AttributeError):
                         unit_price_int = 0
@@ -908,6 +926,7 @@ Now extract ONLY the items from the CURRENT order. Focus on the most recent AI p
 
         except Exception as e:
             logger.error(f"LLM extraction failed: {e}", exc_info=True)
+            items_extracted_successfully = False
             # Fallback: Create default single item
             order_items = [{
                 "product_name": "Product",
@@ -917,6 +936,7 @@ Now extract ONLY the items from the CURRENT order. Focus on the most recent AI p
                 "subtotal": "0",
             }]
             total_price = 0
+            total_discount_amount = 0
 
         # Generate order ID and item IDs with millisecond precision
         from datetime import datetime
@@ -1069,6 +1089,7 @@ Subtotal: ₹{order_summary.original_price}"""
             template_body_values=template_body_values,
             session_id=session_id,
             message="Order confirmed successfully",
+            items_extracted=items_extracted_successfully,
         )
 
     except HTTPException:
