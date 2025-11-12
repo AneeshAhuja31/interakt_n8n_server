@@ -371,15 +371,20 @@ async def save_message(request: SaveMessageRequest):
 
 def preprocess_order_context(messages: list, current_message: str) -> dict:
     """
-    Preprocess chat history to extract only order-relevant context
+    Preprocess chat history to extract only order-relevant context with intelligent filtering
 
     This function filters and processes conversation history to identify:
     1. Product discussions (availability, pricing, specs)
     2. Order intent messages
     3. Removes greetings, unrelated queries, and general messages
+    4. **NEW**: Intelligently identifies the CURRENT order context by:
+       - Finding the most recent product discussion
+       - Detecting conversation boundaries (previous order completions)
+       - Identifying explicit confirmation signals
+       - Excluding items from previous orders or inquiries
 
     Args:
-        messages: List of message dicts from agent_messages table
+        messages: List of message dicts from agent_messages table (ordered newest to oldest)
         current_message: Current user message confirming order
 
     Returns:
@@ -396,10 +401,54 @@ def preprocess_order_context(messages: list, current_message: str) -> dict:
         "hello", "hi", "hey", "namaste", "good morning", "good evening"
     ]
 
-    # Filter messages based on relevance
+    # Keywords that indicate order confirmation/completion (conversation boundaries)
+    order_completion_keywords = [
+        "order confirmed", "order placed", "confirmed your order",
+        "order summary", "order has been", "thank you for your order",
+        "order details", "order id", "order number"
+    ]
+
+    # Keywords that indicate user wants to proceed with current order
+    confirmation_signals = [
+        "yes", "yeah", "sure", "okay", "ok", "confirm", "book",
+        "i want", "i'll take", "proceed", "go ahead", "correct",
+        "right", "that's correct", "sounds good"
+    ]
+
+    # Step 1: Find conversation boundary (last order completion)
+    # Messages are ordered newest to oldest, so we need to reverse to find boundaries
+    messages_oldest_first = list(reversed(messages))
+    last_order_boundary_idx = -1
+
+    for idx, msg in enumerate(messages_oldest_first):
+        content = msg.get("content", "").lower()
+        role = msg.get("role", "")
+
+        # Look for AI messages indicating previous order completion
+        if role == "ai" and any(keyword in content for keyword in order_completion_keywords):
+            last_order_boundary_idx = idx
+            logger.info(f"[preprocess] Found order boundary at index {idx}: {content[:50]}...")
+
+    # Only consider messages AFTER the last order boundary
+    if last_order_boundary_idx >= 0:
+        messages_oldest_first = messages_oldest_first[last_order_boundary_idx + 1:]
+        logger.info(f"[preprocess] Filtered out {last_order_boundary_idx + 1} messages before last order boundary")
+
+    # Step 2: Find the most recent confirmation signal from user
+    last_confirmation_idx = -1
+    for idx, msg in enumerate(messages_oldest_first):
+        content = msg.get("content", "").lower()
+        role = msg.get("role", "")
+
+        # Look for user confirmation signals
+        if role == "human" and any(signal in content for signal in confirmation_signals):
+            last_confirmation_idx = idx
+            logger.info(f"[preprocess] Found confirmation signal at index {idx}: {content}")
+
+    # Step 3: Filter messages based on relevance
     filtered_messages = []
 
-    for msg in messages:
+    for idx, msg in enumerate(messages_oldest_first):
         content = msg.get("content", "").lower()
         role = msg.get("role", "")
 
@@ -407,7 +456,7 @@ def preprocess_order_context(messages: list, current_message: str) -> dict:
         if not content.strip():
             continue
 
-        # Skip pure greeting messages (unless they're AI responses with product info)
+        # Skip pure greeting messages
         if role == "human":
             is_greeting_only = any(
                 greeting in content and len(content.split()) <= 4
@@ -416,24 +465,57 @@ def preprocess_order_context(messages: list, current_message: str) -> dict:
             if is_greeting_only:
                 continue
 
-        # Include if message contains order-relevant keywords
+        # Check if message contains order-relevant keywords
         is_relevant = any(keyword in content for keyword in order_keywords)
 
-        # Always include AI messages (they usually contain product info)
-        # Also include human messages that are relevant to order
-        if role == "ai" or is_relevant:
-            filtered_messages.append(msg)
+        # Strategy: Prioritize messages AFTER the last confirmation signal
+        # If there's a confirmation signal, we assume the product discussion just before it
+        # is what the user wants to order
+        if last_confirmation_idx >= 0:
+            # Look back a few messages before confirmation to get product context
+            context_window_start = max(0, last_confirmation_idx - 5)
+            if idx >= context_window_start:
+                if role == "ai" or is_relevant:
+                    filtered_messages.append(msg)
+        else:
+            # No explicit confirmation found, use recency-based filtering
+            # Prioritize the last 7-8 messages (most recent product discussion)
+            if len(messages_oldest_first) - idx <= 8:
+                if role == "ai" or is_relevant:
+                    filtered_messages.append(msg)
 
-    # Extract product mentions from AI messages (which typically contain product details)
+    # If we have very few filtered messages, fall back to broader filtering
+    if len(filtered_messages) < 2:
+        logger.warning("[preprocess] Too few filtered messages, using fallback filtering")
+        filtered_messages = []
+        for msg in messages_oldest_first:
+            content = msg.get("content", "").lower()
+            role = msg.get("role", "")
+
+            if not content.strip():
+                continue
+
+            if role == "human":
+                is_greeting_only = any(
+                    greeting in content and len(content.split()) <= 4
+                    for greeting in greeting_keywords
+                )
+                if is_greeting_only:
+                    continue
+
+            is_relevant = any(keyword in content for keyword in order_keywords)
+            if role == "ai" or is_relevant:
+                filtered_messages.append(msg)
+
+    # Extract product mentions from AI messages
     product_context = []
     for msg in filtered_messages:
         if msg.get("role") == "ai":
-            # AI messages often contain structured product information
             content = msg.get("content", "")
-            if content and len(content) > 10:  # Skip very short AI responses
+            if content and len(content) > 10:
                 product_context.append(content)
 
-    # Build order-relevant history string
+    # Build order-relevant history string (maintain chronological order)
     order_relevant_history = "\n".join(
         [
             f"{msg.get('role', 'unknown').upper()}: {msg.get('content', '')}"
@@ -444,12 +526,17 @@ def preprocess_order_context(messages: list, current_message: str) -> dict:
     logger.info(
         f"[preprocess_order_context] Filtered {len(messages)} messages down to {len(filtered_messages)} order-relevant messages"
     )
+    logger.info(
+        f"[preprocess_order_context] Found {len(product_context)} AI product responses"
+    )
 
     return {
         "filtered_messages": filtered_messages,
         "product_context": product_context,
         "order_relevant_history": order_relevant_history,
         "message_count": len(filtered_messages),
+        "has_confirmation_signal": last_confirmation_idx >= 0,
+        "has_order_boundary": last_order_boundary_idx >= 0,
     }
 
 
@@ -589,30 +676,57 @@ async def order_confirmation(request: OrderConfirmationRequest):
         structured_llm = llm.with_structured_output(OrderExtraction)
 
         # Create extraction prompt for multiple items
-        extraction_prompt = f"""Analyze the ORDER-RELEVANT conversation history below and extract ALL order items the customer wants to order.
+        extraction_prompt = f"""Analyze the ORDER-RELEVANT conversation history below and extract order items the customer wants to order in their CURRENT order.
 
-NOTE: The conversation history has been pre-filtered to include only product discussions, availability checks, and order-related messages. Greetings and unrelated queries have been removed.
+**CRITICAL INSTRUCTIONS:**
+1. The conversation history has been INTELLIGENTLY PRE-FILTERED to include ONLY the most recent product discussion
+2. Previous orders and old product inquiries have been EXCLUDED from this history
+3. Only extract items that the customer is ordering RIGHT NOW (in this current order confirmation)
+4. DO NOT extract items from old inquiries that are no longer relevant
+5. Focus on the MOST RECENT product discussion and the customer's LATEST confirmation intent
 
-IMPORTANT: Extract MULTIPLE items if the customer is ordering more than one product. Each item should have:
+**Extraction Rules:**
+Extract MULTIPLE items ONLY if the customer is explicitly ordering more than one product in the CURRENT order. Each item should have:
 - product_name: Name of the product (extract from AI responses which contain product details)
 - quantity: Number of items (default to 1 if not mentioned for that specific product)
 - unit_price: Unit price in INR (numbers only, no ₹ symbol) - look in AI responses for pricing
 - discount: Discount information if mentioned (e.g., "15% off" or "No discount") - look in AI responses
 
-Examples:
-- "I want 2 air staplers" → [{{product_name: "Air Stapler", quantity: 2, unit_price: "2499", discount: "No discount"}}]
-- "I want 2 air staplers and 3 nail boxes" → [
-    {{product_name: "Air Stapler", quantity: 2, unit_price: "2499", discount: "No discount"}},
-    {{product_name: "Nail Box", quantity: 3, unit_price: "500", discount: "No discount"}}
-  ]
-- "Give me one pneumatic stapler" → [{{product_name: "Pneumatic Stapler", quantity: 1, unit_price: "4500", discount: "15% off"}}]
+**How to Identify CURRENT Order Items:**
+- Look for the MOST RECENT AI product response(s) in the conversation
+- Match it with the MOST RECENT human confirmation/quantity message
+- If multiple products appear, only include those the customer CONFIRMED in their recent messages
+- Ignore products mentioned earlier that the customer didn't follow up on
 
-**Order-Relevant Conversation History (Pre-filtered):**
+**Examples:**
+Example 1 - Single Product:
+HUMAN: What's the price of air stapler?
+AI: Air Stapler is available at ₹2499 with 10% discount
+HUMAN: I want 2
+→ Extract: [{{product_name: "Air Stapler", quantity: 2, unit_price: "2499", discount: "10% discount"}}]
+
+Example 2 - Multiple Products (Explicit):
+HUMAN: I want 2 air staplers and 3 nail boxes
+AI: Air Stapler: ₹2499, Nail Box: ₹500
+HUMAN: Yes, confirm
+→ Extract: [{{product_name: "Air Stapler", quantity: 2, unit_price: "2499", discount: "No discount"}}, {{product_name: "Nail Box", quantity: 3, unit_price: "500", discount: "No discount"}}]
+
+Example 3 - DO NOT include old products:
+(This scenario should NOT appear in pre-filtered history, but if it does:)
+HUMAN: Tell me about hammer [OLD - should be filtered out]
+AI: Hammer costs ₹800 [OLD - should be filtered out]
+HUMAN: What about pneumatic stapler? [RECENT]
+AI: Pneumatic Stapler costs ₹4500 with 15% off [RECENT]
+HUMAN: I'll take one [RECENT]
+→ Extract ONLY: [{{product_name: "Pneumatic Stapler", quantity: 1, unit_price: "4500", discount: "15% off"}}]
+→ DO NOT extract: Hammer (it was from an old inquiry)
+
+**Order-Relevant Conversation History (Pre-filtered for CURRENT order only):**
 {conversation_history}
 
 **Current User Message:** {request.message}
 
-Extract ALL items from the conversation above. Focus on AI responses for product names, pricing, and discounts. Focus on HUMAN messages for quantities and order intent."""
+Now extract ONLY the items from the CURRENT order. Focus on the most recent AI product response(s) and the customer's latest confirmation."""
 
         try:
             # Get structured output from LLM
