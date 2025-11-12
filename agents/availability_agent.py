@@ -109,6 +109,11 @@ def llm_decision_node(state: AvailabilityAgentState) -> Dict[str, Any]:
             "hinglish_output": f"Sorry, '{state['customer_message']}' abhi available nahi hai. Koi aur product dekhna chahenge?",
             "reasoning": "No matching products found in vector search",
             "current_node": "llm_decision",
+            # Add calculated price fields (default to 0 for out_of_stock)
+            "original_price": 0,
+            "discount_percent": 0,
+            "discount_amount": 0,
+            "final_price": 0,
         }
 
     try:
@@ -211,6 +216,11 @@ def llm_decision_node(state: AvailabilityAgentState) -> Dict[str, Any]:
             "reasoning": f"LLM decision based on similarity score: {top_product.get('similarity_score', 0):.2f}",
             "current_node": "llm_decision",
             "llm_calls": state.get("llm_calls", 0) + 1,
+            # Add calculated price fields from Qdrant data
+            "original_price": top_product.get("original_price", 0),
+            "discount_percent": top_product.get("discount_percent", 0),
+            "discount_amount": top_product.get("discount_amount", 0),
+            "final_price": top_product.get("final_price", 0),
         }
 
     except Exception as e:
@@ -237,6 +247,11 @@ def llm_decision_node(state: AvailabilityAgentState) -> Dict[str, Any]:
             "reasoning": f"Fallback decision (LLM error) - defaulting to in_stock. Error: {str(e)}",
             "error": f"LLM failed, used fallback: {str(e)}",
             "current_node": "llm_decision",
+            # Add calculated price fields from Qdrant data
+            "original_price": top_product.get("original_price", 0),
+            "discount_percent": top_product.get("discount_percent", 0),
+            "discount_amount": top_product.get("discount_amount", 0),
+            "final_price": top_product.get("final_price", 0),
         }
 
 

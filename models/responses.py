@@ -17,6 +17,10 @@ class ProductMatch(BaseModel):
     product_url: str = Field(..., description="Product page URL")
     image_url: str = Field(..., description="Product image URL")
     similarity_score: float = Field(..., description="Vector similarity score (0-1)", ge=0, le=1)
+    original_price: Optional[int] = Field(None, description="Original price before discount (int)")
+    discount_percent: Optional[int] = Field(None, description="Discount percentage (0-100)")
+    discount_amount: Optional[int] = Field(None, description="Discount amount in INR")
+    final_price: Optional[int] = Field(None, description="Final price after discount (int)")
 
     class Config:
         json_schema_extra = {
@@ -29,6 +33,10 @@ class ProductMatch(BaseModel):
                 "product_url": "https://startrade.in/products/pneumatic-stapler-f30",
                 "image_url": "https://cdn.startrade.in/pneumatic-stapler.jpg",
                 "similarity_score": 0.92,
+                "original_price": 4500,
+                "discount_percent": 15,
+                "discount_amount": 675,
+                "final_price": 3825,
             }
         }
 
@@ -107,6 +115,10 @@ class WhatsAppTemplatePayload(BaseModel):
     status: Literal["in_stock", "out_of_stock", "alternate_available"] = Field(
         ..., description="Availability status"
     )
+    original_price: Optional[int] = Field(None, description="Original price before discount (int)")
+    discount_percent: Optional[int] = Field(None, description="Discount percentage (0-100)")
+    discount_amount: Optional[int] = Field(None, description="Discount amount in INR")
+    final_price: Optional[int] = Field(None, description="Final price after discount (int)")
 
     class Config:
         json_schema_extra = {
@@ -130,6 +142,10 @@ class WhatsAppTemplatePayload(BaseModel):
                 "image_url": "https://cdn.startrade.in/pneumatic-stapler.jpg",
                 "summary_output": "Haan, Pneumatic Stapler F30 available hai! Price: ₹4,500 with 15% discount.",
                 "status": "in_stock",
+                "original_price": 4500,
+                "discount_percent": 15,
+                "discount_amount": 675,
+                "final_price": 3825,
             }
         }
 

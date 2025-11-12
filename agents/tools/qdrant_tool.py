@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 from config import settings
 import logging
 import time
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -106,11 +107,43 @@ class QdrantProductSearch:
 
                 # Extract metadata from payload (matching debron_ingestion.py schema)
                 payload = result.payload
+
+                # Parse price and discount to calculate final price
+                price_str = payload.get("price_inr", "Price not available")
+                discount_str = payload.get("discount_info", "No discount")
+
+                # Initialize price fields
+                original_price = 0
+                discount_percent = 0
+                discount_amount = 0
+                final_price = 0
+
+                # Parse original price (remove ₹, INR, commas, etc.)
+                price_match = re.search(r'[\d,]+', price_str)
+                if price_match:
+                    original_price = int(price_match.group().replace(',', ''))
+
+                # Parse discount percentage from discount text (e.g., "25% off" -> 25)
+                discount_match = re.search(r'(\d+)\s*%', discount_str)
+                if discount_match:
+                    discount_percent = int(discount_match.group(1))
+
+                # Calculate discount amount and final price
+                if original_price > 0 and discount_percent > 0:
+                    discount_amount = int(original_price * discount_percent / 100)
+                    final_price = original_price - discount_amount
+                else:
+                    final_price = original_price
+
                 product = {
                     "name": payload.get("product_name", "Unknown Product"),
                     "brand": payload.get("brand", "Unknown Brand"),
-                    "price": payload.get("price_inr", "Price not available"),
-                    "discount": payload.get("discount_info", "No discount"),
+                    "price": price_str,  # Original price string as-is
+                    "discount": discount_str,  # Discount string as-is
+                    "original_price": original_price,  # Parsed original price (int)
+                    "discount_percent": discount_percent,  # Discount percentage (int)
+                    "discount_amount": discount_amount,  # Calculated discount amount (int)
+                    "final_price": final_price,  # Price after discount (int)
                     "specs": payload.get("specs", ""),
                     "model": payload.get("model", ""),
                     "category": payload.get("category", ""),

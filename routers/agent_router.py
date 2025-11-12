@@ -165,6 +165,10 @@ async def check_availability(request: AgentRequest):
             image_url=result.get("image_url", ""),
             summary_output=result.get("hinglish_output", ""),
             status=result.get("availability_status", "out_of_stock"),
+            original_price=result.get("original_price", 0),
+            discount_percent=result.get("discount_percent", 0),
+            discount_amount=result.get("discount_amount", 0),
+            final_price=result.get("final_price", 0),
         )
 
         # Convert retrieved_products to ProductMatch models
@@ -178,6 +182,10 @@ async def check_availability(request: AgentRequest):
                 product_url=p.get("product_url", ""),
                 image_url=p.get("image_url", ""),
                 similarity_score=p.get("similarity_score", 0.0),
+                original_price=p.get("original_price", 0),
+                discount_percent=p.get("discount_percent", 0),
+                discount_amount=p.get("discount_amount", 0),
+                final_price=p.get("final_price", 0),
             )
             for p in result.get("retrieved_products", [])
         ]
