@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  intent-classifier-api:
+  interakt-n8n-server:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: intent_classifier_api
+    container_name: interakt_n8n_server
     ports:
       - "8080:8080"
     environment:
@@ -30,8 +30,8 @@ services:
       # Optional: mount for development with hot reload
       # - .:/app
     networks:
-      - intent-classifier-network
+      - interakt-network
 
 networks:
-  intent-classifier-network:
+  interakt-network:
     driver: bridge
