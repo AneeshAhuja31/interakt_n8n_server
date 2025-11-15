@@ -5,10 +5,23 @@ Extracted from original main.py - handles WhatsApp message intent detection
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import Literal, Optional, Dict, Any
+from typing import Literal, Optional, Dict, Any, List
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from config import settings
+from db.supabase_client import get_supabase_client
+import logging
+
+# Initialize logger
+logger = logging.getLogger(__name__)
+
+# Initialize Supabase client (lazy-load)
+supabase_client = None
+try:
+    supabase_client = get_supabase_client()
+except Exception as e:
+    logger.warning(f"Failed to initialize Supabase client: {e}")
+    supabase_client = None
 
 router = APIRouter(prefix="", tags=["Intent Classification"])
 
@@ -107,11 +120,34 @@ def get_gemini_llm():
 
 
 def classify_intent_with_ai(
-    user_message: str, message_type: str, active_flow: str, last_message: str
+    user_message: str,
+    message_type: str,
+    active_flow: str,
+    last_message: str,
+    chat_history: Optional[List[Dict[str, Any]]] = None
 ) -> IntentClassification:
     """
     Use LangChain + Gemini to classify user intent with structured output
+
+    Args:
+        user_message: The current user message
+        message_type: Type of message (text, image, audio, etc.)
+        active_flow: The current active conversation flow
+        last_message: The last message sent
+        chat_history: Optional list of previous messages from agent_messages table
     """
+
+    # Format chat history for the prompt
+    chat_context = ""
+    if chat_history and len(chat_history) > 0:
+        chat_context = "\n**Previous Conversation History (recent messages, newest first):**\n"
+        # Reverse to show oldest first for better context
+        for msg in reversed(chat_history[-10:]):  # Last 10 messages
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            chat_context += f"- {role}: {content}\n"
+    else:
+        chat_context = "\n**Previous Conversation History:** No previous messages available.\n"
 
     # Create the prompt template using ChatPromptTemplate
     prompt = ChatPromptTemplate.from_messages([
@@ -151,6 +187,7 @@ Your job is to analyze the customer's message and classify it into one of the pr
 12. **unknown**: When message type is not text or intent cannot be determined
 
 **Context-Aware Rules:**
+- Use the conversation history to understand the context of the current message
 - If active_flow is "availability_check_with_link" and message_type is "text", likely intent is "product_availability_query"
 - If active_flow is "order_confirmation_simple" and user says yes/confirm/ok/done, intent is "order_confirmation_approval"
 - If active_flow is "none" and no other intent matches, use "general_text_message"
@@ -163,7 +200,12 @@ Classify the intent based on the context and message above."""),
 - Current conversation flow: {active_flow}
 - Previous message: {last_message}
 - Message type: {message_type}
-- User message: {user_message}""")
+
+{chat_context}
+
+**Current User Message:** {user_message}
+
+Based on the conversation history and current context, classify the intent of the current user message.""")
     ])
 
     # Initialize LLM with structured output
@@ -177,6 +219,7 @@ Classify the intent based on the context and message above."""),
             message_type=message_type,
             active_flow=active_flow,
             last_message=last_message,
+            chat_context=chat_context,
         )
     )
 
@@ -193,6 +236,7 @@ async def classify_intent(request: IntentRequest):
     """
     Main endpoint to classify WhatsApp message intent
     Replaces the Code1 node in n8n workflow
+    Now includes previous chat context from agent_messages table
     """
 
     try:
@@ -233,18 +277,42 @@ async def classify_intent(request: IntentRequest):
         active_flow = contact.active_template_flow or "none"
         last_message = contact.last_message or ""
 
+        # Get phone number and generate session_id
+        phone_number = customer.phone_number or contact.phone_number or "unknown"
+        if phone_number != "unknown" and not phone_number.startswith("+"):
+            phone_number = f"+91{phone_number}"
+        session_id = f"whatsapp_{phone_number}"
+
+        # Retrieve recent chat history from agent_messages table
+        chat_history = []
+        if supabase_client and phone_number != "unknown":
+            try:
+                # Get or create session
+                session = await supabase_client.get_or_create_session(phone_number)
+                logger.info(f"Session retrieved/created: {session.get('session_id')}")
+
+                # Retrieve recent messages (last 10 for context)
+                chat_history = await supabase_client.get_recent_messages(
+                    session_id=session_id, limit=10
+                )
+                logger.info(f"Retrieved {len(chat_history)} messages from history for intent classification")
+            except Exception as e:
+                logger.warning(f"Failed to retrieve chat history for intent classification: {e}")
+                chat_history = []
+
         # Check if quick message (button-based)
         check_if_quick_message = bool(
             msg.message_context or (msg.button_text and msg.button_payload)
         )
 
-        # Use AI to classify intent
+        # Use AI to classify intent with chat history
         if message_type == "text" and user_message:
             classification = classify_intent_with_ai(
                 user_message=user_message,
                 message_type=message_type,
                 active_flow=active_flow,
                 last_message=last_message,
+                chat_history=chat_history,
             )
             detected_intent = classification.detected_intent
         else:
@@ -252,15 +320,15 @@ async def classify_intent(request: IntentRequest):
 
         # Prepare response matching Code1 output structure
         response = IntentResponse(
-            phone_number=customer.phone_number or contact.phone_number or "unknown",
+            phone_number=phone_number,
             user_message=user_message,
             message_type=message_type,
             detected_intent=detected_intent,
             active_template_flow=active_flow,
             last_message=last_message,
             full_context={
-                "contact_record": contact.dict() if contact else {},
-                "webhook_payload": webhook.dict() if webhook else {},
+                "contact_record": contact.model_dump() if contact else {},
+                "webhook_payload": webhook.model_dump() if webhook else {},
             },
             check_if_quick_message=check_if_quick_message,
         )

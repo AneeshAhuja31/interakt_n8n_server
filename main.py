@@ -7,7 +7,7 @@ Version 2.0.0 - Refactored with routers and LangGraph integration
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import intent_router, agent_router
+from routers import intent_router, agent_router, product_identification_router
 from config import settings
 from contextlib import asynccontextmanager
 
@@ -41,6 +41,7 @@ app.add_middleware(
 # Include routers
 app.include_router(intent_router)
 app.include_router(agent_router)
+app.include_router(product_identification_router)
 
 
 
@@ -64,12 +65,15 @@ async def root():
             "agent_availability": "/agent/availability",
             "agent_availability_n8n": "/agent/availability/n8n",
             "agent_health": "/agent/health",
+            "product_identification": "/product-identification/identify-product-from-url",
+            "product_identification_health": "/product-identification/health",
             "docs": "/docs",
             "redoc": "/redoc",
         },
         "models": {
             "intent_classifier": "gemini-2.0-flash-exp",
             "availability_agent": settings.GEMINI_MODEL,
+            "product_identification": "CLIP + GPT-4o",
         },
         "integrations": {
             "vector_store": "Qdrant",
@@ -104,7 +108,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT",8000)),
+        port=int(os.getenv("PORT",8080)),
         reload=True,
         log_level="info",
     )
