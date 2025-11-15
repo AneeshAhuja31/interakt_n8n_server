@@ -24,6 +24,8 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY requirements.txt .
 
 # Install Python dependencies using uv
+# Increase timeout for large packages like PyTorch
+ENV UV_HTTP_TIMEOUT=300
 RUN uv pip install --system --no-cache -r requirements.txt
 
 # Copy the application code
